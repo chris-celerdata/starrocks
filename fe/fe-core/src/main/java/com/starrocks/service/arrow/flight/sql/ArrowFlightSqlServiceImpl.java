@@ -76,6 +76,7 @@ import java.nio.channels.Channels;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 
@@ -138,7 +139,10 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
                 String token = context.peerIdentity();
                 ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(token);
 
-                ctx.reset(request.getQuery());
+                ArrowFlightSqlQueryConnectContext queryCtx = ctx.createQueryContext(request.getQuery());
+                final ByteString handle = ByteString.copyFromUtf8(
+                        context.peerIdentity() + ":" + queryCtx.getQueryId()
+                );
                 // To prevent the client from mistakenly interpreting an empty Schema as an update statement (instead of a query statement),
                 // we need to ensure that the Schema returned by createPreparedStatement includes the query metadata.
                 // This means we need to correctly set the DatasetSchema and ParameterSchema in ActionCreatePreparedStatementResult.
@@ -147,6 +151,7 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
                     Schema schema = schemaRoot.getSchema();
                     FlightSql.ActionCreatePreparedStatementResult result =
                             FlightSql.ActionCreatePreparedStatementResult.newBuilder()
+                                    .setPreparedStatementHandle(handle)
                                     .setDatasetSchema(ByteString.copyFrom(serializeMetadata(schema)))
                                     .setParameterSchema(ByteString.copyFrom(serializeMetadata(schema))).build();
                     listener.onNext(new Result(Any.pack(result).toByteArray()));
@@ -186,7 +191,9 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
         if (!StringUtils.isEmpty(database)) {
             ctx.setDatabase(database);
         }
-        return getFlightInfoFromQuery(ctx, descriptor);
+        String handle = command.getPreparedStatementHandle().toStringUtf8();
+        String queryId = handle.split(":", 2)[1]; 
+        return getFlightInfoFromQuery(ctx.getQueryContext(UUID.fromString(queryId)), descriptor);
     }
 
     /**
@@ -202,9 +209,8 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
                                              FlightDescriptor descriptor) {
         String token = context.peerIdentity();
         ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(token);
-        ctx.reset(command.getQuery());
-        ctx.setThreadLocalInfo();
-        return getFlightInfoFromQuery(ctx, descriptor);
+        ArrowFlightSqlQueryConnectContext queryCtx = ctx.createQueryContext(command.getQuery());
+        return getFlightInfoFromQuery(queryCtx, descriptor);
     }
 
     @Override
@@ -429,12 +435,13 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
         String queryId = ticketParts[1];
 
         ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(token);
-        VectorSchemaRoot vectorSchemaRoot = ctx.getResult(queryId);
+        ArrowFlightSqlQueryConnectContext queryCtx = ctx.getQueryContext(queryId);
+        VectorSchemaRoot vectorSchemaRoot = queryCtx.getResult();
         if (vectorSchemaRoot == null) {
             throw CallStatus.NOT_FOUND.withDescription("cannot find result of the query [" + queryId + "]").toRuntimeException();
         }
 
-        listener.setOnCancelHandler(ctx::cancelQuery);
+        listener.setOnCancelHandler(queryCtx::cancelQuery);
 
         listener.start(vectorSchemaRoot);
         listener.putNext();
@@ -443,7 +450,7 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
         ctx.removeResult(queryId);
     }
 
-    protected FlightInfo getFlightInfoFromQuery(ArrowFlightSqlConnectContext ctx, FlightDescriptor descriptor) {
+    protected FlightInfo getFlightInfoFromQuery(ArrowFlightSqlQueryConnectContext ctx, FlightDescriptor descriptor) {
         try {
             CompletableFuture<Void> processorFinished = new CompletableFuture<>();
             executor.submit(() -> {
@@ -451,7 +458,9 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
                     StatementBase parsedStmt = parse(ctx.getQuery(), ctx.getSessionVariable());
                     ctx.setStatement(parsedStmt);
                     ctx.setThreadLocalInfo();
-
+                    
+                    LOG.warn("[ARROW] Received query {} [queryID={}]",
+                            ctx.getQuery(), DebugUtil.printId(ctx.getExecutionId()));
                     ArrowFlightSqlConnectProcessor processor = new ArrowFlightSqlConnectProcessor(ctx);
                     processor.processOnce();
 
@@ -477,15 +486,14 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
                             DebugUtil.printId(ctx.getExecutionId()),
                             ctx.getState().getErrorMessage()));
                 }
-                String queryId = DebugUtil.printId(ctx.getExecutionId());
-                if (ctx.getResult(queryId) == null) {
-                    ctx.setEmptyResultIfNotExist(queryId);
+                if (ctx.getResult() == null) {
+                    ctx.setEmptyResultIfNotExist();
                 }
                 final ByteString handle = buildFETicket(ctx);
 
                 FlightSql.TicketStatementQuery ticketStatement =
                         FlightSql.TicketStatementQuery.newBuilder().setStatementHandle(handle).build();
-                return buildFlightInfoFromFE(ticketStatement, descriptor, ctx.getResult(queryId).getSchema());
+                return buildFlightInfoFromFE(ticketStatement, descriptor, ctx.getResult().getSchema());
             }
 
             // ------------------------------------------------------------------------------------
@@ -522,7 +530,7 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
         }
     }
 
-    private static ByteString buildFETicket(ArrowFlightSqlConnectContext ctx) {
+    private static ByteString buildFETicket(ArrowFlightSqlQueryConnectContext ctx) {
         // FETicket: <Token> : <QueryId>
         return ByteString.copyFromUtf8(ctx.getArrowFlightSqlToken() + ":" + DebugUtil.printId(ctx.getExecutionId()));
     }

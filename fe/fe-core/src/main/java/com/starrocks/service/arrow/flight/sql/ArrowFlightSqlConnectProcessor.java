@@ -51,7 +51,7 @@ public class ArrowFlightSqlConnectProcessor extends ConnectProcessor {
                 .setCatalog(ctx.getCurrentCatalog());
         Tracers.register(ctx);
 
-        StatementBase parsedStmt = ((ArrowFlightSqlConnectContext) ctx).getStatement();
+        StatementBase parsedStmt = ((ArrowFlightSqlQueryConnectContext) ctx).getStatement();
         String sql = parsedStmt.getOrigStmt().originStmt;
 
         executor = new StmtExecutor(ctx, parsedStmt);

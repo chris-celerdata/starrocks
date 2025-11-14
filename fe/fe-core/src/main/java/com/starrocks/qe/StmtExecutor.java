@@ -134,7 +134,7 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.GracefulExitFlag;
 import com.starrocks.server.WarehouseManager;
 import com.starrocks.service.ExecuteEnv;
-import com.starrocks.service.arrow.flight.sql.ArrowFlightSqlConnectContext;
+import com.starrocks.service.arrow.flight.sql.ArrowFlightSqlQueryConnectContext;
 import com.starrocks.sql.ExplainAnalyzer;
 import com.starrocks.sql.PrepareStmtPlanner;
 import com.starrocks.sql.StatementPlanner;
@@ -765,7 +765,7 @@ public class StmtExecutor {
                     } catch (Exception e) {
                         // For Arrow Flight SQL, FE doesn't know whether the client has already pull data from BE.
                         // So FE cannot decide whether it is able to retry.
-                        if (i == retryTime - 1 || context instanceof ArrowFlightSqlConnectContext) {
+                        if (i == retryTime - 1 || context instanceof ArrowFlightSqlQueryConnectContext) {
                             throw e;
                         }
                         ExecuteExceptionHandler.handle(e, retryContext);
@@ -1414,7 +1414,7 @@ public class StmtExecutor {
 
         // TODO(liuzihe): support execute in FE for Arrow Flight SQL.
         boolean executeInFe = !isExplainAnalyze && !isSchedulerExplain && !isOutfileQuery
-                && canExecuteInFe(context, execPlan.getPhysicalPlan()) && !(context instanceof ArrowFlightSqlConnectContext);
+                && canExecuteInFe(context, execPlan.getPhysicalPlan()) && !(context instanceof ArrowFlightSqlQueryConnectContext);
 
         if (isExplainAnalyze) {
             context.getSessionVariable().setEnableProfile(true);
@@ -1468,8 +1468,8 @@ public class StmtExecutor {
         RowBatch batch = null;
         if (context instanceof HttpConnectContext) {
             batch = httpResultSender.sendQueryResult(coord, execPlan, parsedStmt.getOrigStmt().getOrigStmt());
-        } else if (context instanceof ArrowFlightSqlConnectContext) {
-            ArrowFlightSqlConnectContext ctx = (ArrowFlightSqlConnectContext) context;
+        } else if (context instanceof ArrowFlightSqlQueryConnectContext) {
+            ArrowFlightSqlQueryConnectContext ctx = (ArrowFlightSqlQueryConnectContext) context;
             ctx.setReturnResultFromFE(false);
             ctx.setDeploymentFinished(coord);
         } else {
@@ -1519,7 +1519,7 @@ public class StmtExecutor {
             }
         }
 
-        if (context instanceof ArrowFlightSqlConnectContext) {
+        if (context instanceof ArrowFlightSqlQueryConnectContext) {
             coord.join(context.getSessionVariable().getQueryTimeoutS());
             if (!isOutfileQuery) {
                 context.getState().setEof();
@@ -2119,9 +2119,9 @@ public class StmtExecutor {
         }
 
         // Send result set for Arrow Flight SQL.
-        if (context instanceof ArrowFlightSqlConnectContext) {
-            ArrowFlightSqlConnectContext ctx = (ArrowFlightSqlConnectContext) context;
-            ctx.addShowResult(DebugUtil.printId(ctx.getExecutionId()), resultSet);
+        if (context instanceof ArrowFlightSqlQueryConnectContext) {
+            ArrowFlightSqlQueryConnectContext ctx = (ArrowFlightSqlQueryConnectContext) context;
+            ctx.addShowResult(resultSet);
             context.getState().setEof();
             return;
         }
