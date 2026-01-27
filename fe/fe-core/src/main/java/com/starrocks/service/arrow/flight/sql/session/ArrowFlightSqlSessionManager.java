@@ -27,6 +27,7 @@ import com.starrocks.common.Config;
 import com.starrocks.common.Pair;
 import com.starrocks.common.util.UUIDUtil;
 import com.starrocks.qe.ConnectScheduler;
+import com.starrocks.qe.GlobalVariable;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.service.ExecuteEnv;
 import com.starrocks.service.arrow.flight.sql.ArrowFlightSqlConnectContext;
@@ -65,7 +66,7 @@ public class ArrowFlightSqlSessionManager {
     }
 
     public String initializeSession(String username, String remoteIP, String password) {
-        String token = UUIDUtil.genUUID().toString();
+        String token = generateToken();
         ArrowFlightSqlConnectContext ctx = new ArrowFlightSqlConnectContext(token);
         ctx.setRemoteIP(remoteIP);
 
@@ -130,5 +131,50 @@ public class ArrowFlightSqlSessionManager {
                     .toRuntimeException();
         }
         return connectContext;
+    }
+
+    /**
+     * Check if a token was issued by this FE node.
+     * When proxy is enabled, tokens contain the FE host prefix.
+     */
+    public boolean isLocalToken(String token) {
+        if (!GlobalVariable.isArrowFlightProxyEnabled()) {
+            return true;  // Without proxy, all tokens are local
+        }
+        String feHost = extractFeHost(token);
+        if (feHost == null) {
+            return true;  // Legacy token format (no host prefix)
+        }
+        String selfHost = GlobalStateMgr.getCurrentState().getNodeMgr().getSelfNode().first;
+        return feHost.equals(selfHost);
+    }
+
+    /**
+     * Extract the FE host from a token.
+     * Token format when proxy enabled: "FE_HOST:UUID"
+     * Returns null if token doesn't contain host prefix.
+     */
+    public static String extractFeHost(String token) {
+        if (StringUtils.isEmpty(token)) {
+            return null;
+        }
+        int colonIndex = token.indexOf(':');
+        if (colonIndex <= 0) {
+            return null;  // No host prefix or invalid format
+        }
+        return token.substring(0, colonIndex);
+    }
+
+    /**
+     * Generate a token. When proxy is enabled, includes FE host prefix.
+     * Format: "FE_HOST:UUID" (proxy enabled) or "UUID" (proxy disabled)
+     */
+    private String generateToken() {
+        String uuid = UUIDUtil.genUUID().toString();
+        if (GlobalVariable.isArrowFlightProxyEnabled()) {
+            String selfHost = GlobalStateMgr.getCurrentState().getNodeMgr().getSelfNode().first;
+            return selfHost + ":" + uuid;
+        }
+        return uuid;
     }
 }

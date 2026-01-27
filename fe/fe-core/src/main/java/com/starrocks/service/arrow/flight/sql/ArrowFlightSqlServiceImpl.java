@@ -29,6 +29,7 @@ import com.starrocks.common.Pair;
 import com.starrocks.common.ThreadPoolManager;
 import com.starrocks.common.util.ArrowUtil;
 import com.starrocks.common.util.DebugUtil;
+import com.starrocks.qe.GlobalVariable;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.service.arrow.flight.sql.session.ArrowFlightSqlSessionManager;
 import com.starrocks.sql.ast.expression.Expr;
@@ -77,6 +78,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -142,7 +144,15 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
      */
     @Override
     public void closeSession(CloseSessionRequest request, CallContext context, StreamListener<CloseSessionResult> listener) {
-        ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(context.peerIdentity());
+        String token = context.peerIdentity();
+
+        // When proxy is enabled and token is from another FE, forward the request
+        if (GlobalVariable.isArrowFlightProxyEnabled() && !sessionManager.isLocalToken(token)) {
+            forwardCloseSessionToRemoteFE(token, listener);
+            return;
+        }
+
+        ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(token);
         ctx.kill(true, "Close Arrow Flight SQL session via RPC request");
         sessionManager.closeSession(ctx.getArrowFlightSqlToken());
         listener.onCompleted();
@@ -170,6 +180,13 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
         EXECUTOR.submit(() -> {
             try {
                 String token = context.peerIdentity();
+
+                // When proxy is enabled and token is from another FE, forward the request
+                if (GlobalVariable.isArrowFlightProxyEnabled() && !sessionManager.isLocalToken(token)) {
+                    forwardActionToRemoteFE(token, request, listener);
+                    return;
+                }
+
                 ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(token);
 
                 String preparedStmtId = ctx.addPreparedStatement(request.getQuery());
@@ -205,6 +222,15 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
     public void closePreparedStatement(FlightSql.ActionClosePreparedStatementRequest request, CallContext context,
                                        StreamListener<Result> listener) {
         String token = context.peerIdentity();
+
+        // When proxy is enabled and token is from another FE, forward the request
+        if (GlobalVariable.isArrowFlightProxyEnabled() && !sessionManager.isLocalToken(token)) {
+            EXECUTOR.submit(() -> {
+                forwardActionToRemoteFE(token, request, listener);
+            });
+            return;
+        }
+
         ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(token);
 
         String preparedStmtId = request.getPreparedStatementHandle().toStringUtf8();
@@ -214,14 +240,22 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
     }
 
     /**
-     * Execute the prepared statement and return the endpoint of the result stream.
+     * Execute a prepared statement query and return the endpoint of the result stream.
      *
-     * <p> Planner and coordinator will be executed in this method.
+     * <p> When proxy is enabled and the token is from another FE, the request is forwarded
+     * to the FE that issued the token, since the prepared statement state exists only on that FE.
      */
     @Override
     public FlightInfo getFlightInfoPreparedStatement(FlightSql.CommandPreparedStatementQuery command, CallContext context,
                                                      FlightDescriptor descriptor) {
         String token = context.peerIdentity();
+
+        // When proxy is enabled and token is from another FE, forward the request
+        // The prepared statement state exists only on the FE that created it
+        if (GlobalVariable.isArrowFlightProxyEnabled() && !sessionManager.isLocalToken(token)) {
+            return forwardGetFlightInfoToRemoteFE(token, command);
+        }
+
         ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(token);
         String database = context.getMiddleware(FlightConstants.HEADER_KEY).headers().get("database");
         if (!StringUtils.isEmpty(database)) {
@@ -245,11 +279,20 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
      *
      * <p> This is for the native Arrow Flight Client, such as FlightSqlClient in Java.
      * The RPC sequence is getFlightInfoStatement -> getStreamStatement.
+     *
+     * <p> When proxy is enabled and the token is from another FE, the request is forwarded
+     * to the FE that issued the token.
      */
     @Override
     public FlightInfo getFlightInfoStatement(FlightSql.CommandStatementQuery command, CallContext context,
                                              FlightDescriptor descriptor) {
         String token = context.peerIdentity();
+
+        // When proxy is enabled and token is from another FE, forward the request
+        if (GlobalVariable.isArrowFlightProxyEnabled() && !sessionManager.isLocalToken(token)) {
+            return forwardGetFlightInfoToRemoteFE(token, command);
+        }
+
         ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(token);
         String query = command.getQuery();
         return getFlightInfoFromQuery(ctx, descriptor, query);
@@ -273,13 +316,21 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
     public void setSessionOptions(SetSessionOptionsRequest request, CallContext context,
                                   StreamListener<SetSessionOptionsResult> listener) {
         EXECUTOR.submit(() -> {
+            String token = context.peerIdentity();
+
+            // When proxy is enabled and token is from another FE, forward the request
+            if (GlobalVariable.isArrowFlightProxyEnabled() && !sessionManager.isLocalToken(token)) {
+                forwardSetSessionOptionsToRemoteFE(token, request, listener);
+                return;
+            }
+
             Map<String, SetSessionOptionsResult.Error> errors = Maps.newHashMap();
             request.getSessionOptions().forEach((key, value) -> {
                 // Only support set `catalog` for now.
                 if (!key.equalsIgnoreCase("catalog")) {
                     errors.put(key, new SetSessionOptionsResult.Error(SetSessionOptionsResult.ErrorValue.INVALID_NAME));
                 } else {
-                    ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(context.peerIdentity());
+                    ArrowFlightSqlConnectContext ctx = sessionManager.validateAndGetConnectContext(token);
                     String catalog = value.acceptVisitor(new NoOpSessionOptionValueVisitor<>() {
                         @Override
                         public String visit(String value) {
@@ -615,6 +666,156 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
         listener.putNext();
         listener.completed();
         ctx.removeResult(queryId);
+    }
+
+    /**
+     * Forward a getFlightInfo request to the FE that issued the token.
+     * Used when proxy is enabled and a request arrives at a different FE than the one that authenticated the client.
+     *
+     * @param token The bearer token containing the FE host
+     * @param command The protobuf command to forward (e.g., CommandStatementQuery, CommandPreparedStatementQuery)
+     */
+    private FlightInfo forwardGetFlightInfoToRemoteFE(String token, Message command) {
+        String feHost = ArrowFlightSqlSessionManager.extractFeHost(token);
+        if (feHost == null) {
+            throw CallStatus.INVALID_ARGUMENT
+                    .withDescription("Invalid token format: cannot extract FE host from token")
+                    .toRuntimeException();
+        }
+
+        int fePort = Config.arrow_flight_port;
+        String nodeKey = feHost + ":" + fePort;
+
+        try {
+            FlightClient client = getOrCreateClient(nodeKey, feHost, fePort);
+            FlightDescriptor descriptor = FlightDescriptor.command(Any.pack(command).toByteArray());
+            CredentialCallOption authOption = new CredentialCallOption(new BearerCredentialWriter(token));
+
+            FlightInfo remoteInfo = client.getInfo(descriptor, authOption);
+            LOG.info("[ARROW] Forwarded getFlightInfo to remote FE {}:{}", feHost, fePort);
+            return remoteInfo;
+
+        } catch (Exception e) {
+            LOG.warn("[ARROW] Failed to forward getFlightInfo to remote FE {}:{}", feHost, fePort, e);
+            throw CallStatus.UNAVAILABLE
+                    .withDescription("Failed to forward request to FE " + feHost + ": " + e.getMessage())
+                    .withCause(e)
+                    .toRuntimeException();
+        }
+    }
+
+    /**
+     * Forward an action to the FE that issued the token.
+     *
+     * @param token The bearer token containing the FE host
+     * @param request The protobuf action request to forward
+     * @param listener The listener to receive results
+     */
+    private void forwardActionToRemoteFE(String token, Message request, StreamListener<Result> listener) {
+        String feHost = ArrowFlightSqlSessionManager.extractFeHost(token);
+        if (feHost == null) {
+            listener.onError(CallStatus.INVALID_ARGUMENT
+                    .withDescription("Invalid token format: cannot extract FE host from token")
+                    .toRuntimeException());
+            return;
+        }
+
+        int fePort = Config.arrow_flight_port;
+        String nodeKey = feHost + ":" + fePort;
+
+        try {
+            FlightClient client = getOrCreateClient(nodeKey, feHost, fePort);
+            CredentialCallOption authOption = new CredentialCallOption(new BearerCredentialWriter(token));
+
+            org.apache.arrow.flight.Action action = new org.apache.arrow.flight.Action(
+                    request.getDescriptorForType().getFullName(),
+                    Any.pack(request).toByteArray());
+
+            Iterator<Result> results = client.doAction(action, authOption);
+            while (results.hasNext()) {
+                listener.onNext(results.next());
+            }
+            listener.onCompleted();
+
+            LOG.info("[ARROW] Forwarded action {} to remote FE {}:{}",
+                    request.getDescriptorForType().getName(), feHost, fePort);
+
+        } catch (Exception e) {
+            LOG.warn("[ARROW] Failed to forward action to remote FE {}:{}", feHost, fePort, e);
+            listener.onError(CallStatus.UNAVAILABLE
+                    .withDescription("Failed to forward action to FE " + feHost + ": " + e.getMessage())
+                    .withCause(e)
+                    .toRuntimeException());
+        }
+    }
+
+    /**
+     * Forward a setSessionOptions request to the FE that issued the token.
+     */
+    private void forwardSetSessionOptionsToRemoteFE(String token, SetSessionOptionsRequest request,
+                                                     StreamListener<SetSessionOptionsResult> listener) {
+        String feHost = ArrowFlightSqlSessionManager.extractFeHost(token);
+        if (feHost == null) {
+            listener.onError(CallStatus.INVALID_ARGUMENT
+                    .withDescription("Invalid token format: cannot extract FE host from token")
+                    .toRuntimeException());
+            return;
+        }
+
+        int fePort = Config.arrow_flight_port;
+        String nodeKey = feHost + ":" + fePort;
+
+        try {
+            FlightClient client = getOrCreateClient(nodeKey, feHost, fePort);
+            CredentialCallOption authOption = new CredentialCallOption(new BearerCredentialWriter(token));
+
+            SetSessionOptionsResult result = client.setSessionOptions(request, authOption);
+            listener.onNext(result);
+            listener.onCompleted();
+
+            LOG.info("[ARROW] Forwarded setSessionOptions to remote FE {}:{}", feHost, fePort);
+
+        } catch (Exception e) {
+            LOG.warn("[ARROW] Failed to forward setSessionOptions to remote FE {}:{}", feHost, fePort, e);
+            listener.onError(CallStatus.UNAVAILABLE
+                    .withDescription("Failed to forward setSessionOptions to FE " + feHost + ": " + e.getMessage())
+                    .withCause(e)
+                    .toRuntimeException());
+        }
+    }
+
+    /**
+     * Forward a closeSession request to the FE that issued the token.
+     */
+    private void forwardCloseSessionToRemoteFE(String token, StreamListener<CloseSessionResult> listener) {
+        String feHost = ArrowFlightSqlSessionManager.extractFeHost(token);
+        if (feHost == null) {
+            listener.onError(CallStatus.INVALID_ARGUMENT
+                    .withDescription("Invalid token format: cannot extract FE host from token")
+                    .toRuntimeException());
+            return;
+        }
+
+        int fePort = Config.arrow_flight_port;
+        String nodeKey = feHost + ":" + fePort;
+
+        try {
+            FlightClient client = getOrCreateClient(nodeKey, feHost, fePort);
+            CredentialCallOption authOption = new CredentialCallOption(new BearerCredentialWriter(token));
+
+            CloseSessionResult result = client.closeSession(new CloseSessionRequest(), authOption);
+            listener.onNext(result);
+            listener.onCompleted();
+
+            LOG.info("[ARROW] Forwarded closeSession to remote FE {}:{}", feHost, fePort);
+
+        } catch (Exception e) {
+            LOG.warn("[ARROW] Failed to forward closeSession to remote FE {}:{}", feHost, fePort, e);
+            listener.onError(CallStatus.UNAVAILABLE
+                    .withDescription("Failed to forward closeSession to FE " + feHost + ": " + e.getMessage())
+                    .withCause(e)
+                    .toRuntimeException());
+        }
     }
 
     /**
