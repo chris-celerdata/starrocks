@@ -14,8 +14,7 @@
 
 package com.starrocks.service.arrow.flight.sql.auth2;
 
-import com.starrocks.qe.SessionVariable;
-import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.qe.GlobalVariable;
 import com.starrocks.service.arrow.flight.sql.session.ArrowFlightSqlSessionManager;
 import org.apache.arrow.flight.CallHeaders;
 import org.apache.arrow.flight.CallStatus;
@@ -76,9 +75,7 @@ public class ArrowFlightSqlAuthenticator implements CallHeaderAuthenticator {
     }
 
     private boolean isProxyEnabled() {
-        SessionVariable globalSv = GlobalStateMgr.getCurrentState()
-                .getVariableMgr().getDefaultSessionVariable();
-        return globalSv.isArrowFlightProxyEnabled();
+        return GlobalVariable.isArrowFlightProxyEnabled();
     }
 
     private AuthResult createAuthResult(String token) {

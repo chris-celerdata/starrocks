@@ -29,7 +29,6 @@ import com.starrocks.common.Pair;
 import com.starrocks.common.ThreadPoolManager;
 import com.starrocks.common.util.ArrowUtil;
 import com.starrocks.common.util.DebugUtil;
-import com.starrocks.qe.SessionVariable;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.service.arrow.flight.sql.session.ArrowFlightSqlSessionManager;
 import com.starrocks.sql.ast.expression.Expr;
@@ -87,7 +86,7 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
     private static final Logger LOG = LogManager.getLogger(ArrowFlightSqlServiceImpl.class);
     private final BufferAllocator rootAllocator = new RootAllocator();
     private final ArrowFlightSqlSessionManager sessionManager;
-    private final Location feEndpoint;
+    private final ArrowFlightSqlTicketManager ticketManager;
     private final SqlInfoBuilder sqlInfoBuilder;
     private final Cache<String, FlightClient> clientCache = CacheBuilder.newBuilder()
             .maximumSize(256)
@@ -112,7 +111,7 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
 
     public ArrowFlightSqlServiceImpl(final ArrowFlightSqlSessionManager sessionManager, final Location feEndpoint) {
         this.sessionManager = sessionManager;
-        this.feEndpoint = feEndpoint;
+        this.ticketManager = createTicketManager(feEndpoint);
         this.sqlInfoBuilder = new SqlInfoBuilder();
         this.sqlInfoBuilder.withFlightSqlServerName("StarRocks")
                 .withFlightSqlServerVersion("1.0.0")
@@ -473,69 +472,48 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
     }
 
     private void getStreamResult(String ticket, ServerStreamListener listener) {
-        String[] ticketParts = ticket.split("\\|");
+        ArrowFlightSqlTicketManager.ParsedTicket parsedTicket = ticketManager.parseTicket(ticket);
 
-        switch (ticketParts.length) {
-            case 2:
-                // FE local: <Token>|<QueryId>
-                getStreamResultFromFE(ticketParts[0], ticketParts[1], listener);
+        switch (parsedTicket.getType()) {
+            case FE_LOCAL:
+                getStreamResultFromFE(parsedTicket.getToken(), parsedTicket.getQueryId(), listener);
                 break;
-            case 3:
-                // FE proxy: <Token>|<QueryId>|<FEHost>:<FEPort>
-                getStreamResultFromRemoteFE(ticketParts[0], ticketParts[1], ticketParts[2], listener);
+            case FE_PROXY:
+                getStreamResultFromRemoteFE(parsedTicket, listener);
                 break;
-            case 4:
-                // BE proxy: <QueryId>|<FragmentInstanceId>|<BEHost>|<BEPort>
-                try {
-                    getStreamResultFromBE(ticketParts[0], ticketParts[1], ticketParts[2],
-                            Integer.parseInt(ticketParts[3]), listener);
-                } catch (NumberFormatException e) {
-                    throw CallStatus.INVALID_ARGUMENT.withDescription(
-                            String.format("Invalid ticket format: expected numerical port, received [%s]",
-                                    ticketParts[3])).toRuntimeException();
-                }
+            case BE_PROXY:
+                getStreamResultFromBE(parsedTicket, listener);
                 break;
             default:
                 throw CallStatus.INVALID_ARGUMENT.withDescription(
-                        String.format("Invalid ticket format: expected 2, 3, or 4 parts, got [%d]",
-                                ticketParts.length)).toRuntimeException();
+                        "Unknown ticket type: " + parsedTicket.getType()).toRuntimeException();
         }
     }
 
-    private void getStreamResultFromBE(String queryId, String fragmentInstanceId,
-                                        String beHost, int bePort, ServerStreamListener listener) {
-        ByteString ticketHandle = buildBETicket(queryId, fragmentInstanceId);
-        // no token needed for be connection
-        getStreamResultFromRemoteNode(beHost, bePort, ticketHandle, null, "BE", listener);
+    /**
+     * Proxies the result stream from a remote BE to the client.
+     *
+     * <p>The queryId in the ticket serves as a validation token between FE, BE, and client,
+     * since it's a random UUID that was generated during query execution. This allows the BE
+     * to validate that the request is legitimate without requiring a separate bearer token.
+     */
+    private void getStreamResultFromBE(ArrowFlightSqlTicketManager.ParsedTicket ticket,
+                                        ServerStreamListener listener) {
+        ByteString ticketHandle = ticketManager.buildBETicket(ticket.getQueryId(), ticket.getFragmentInstanceId());
+        // bearerToken is null for BE connections because the queryId in the ticket serves as the validation token
+        getStreamResultFromRemoteNode(ticket.getHost(), ticket.getPort(), ticketHandle, null, "BE", listener);
     }
 
-    private void getStreamResultFromRemoteFE(String token, String queryId,
-                                              String feHostPort, ServerStreamListener listener) {
-        String[] parts = feHostPort.split(":");
-        if (parts.length != 2) {
-            throw CallStatus.INVALID_ARGUMENT.withDescription(
-                    "Invalid FE host:port format: " + feHostPort).toRuntimeException();
-        }
-
-        String feHost = parts[0];
-        int fePort;
-        try {
-            fePort = Integer.parseInt(parts[1]);
-        } catch (NumberFormatException e) {
-            throw CallStatus.INVALID_ARGUMENT.withDescription(
-                    "Invalid FE port: " + parts[1]).toRuntimeException();
-        }
-
+    private void getStreamResultFromRemoteFE(ArrowFlightSqlTicketManager.ParsedTicket ticket,
+                                              ServerStreamListener listener) {
         // Check if this is the local FE - if so, handle locally to avoid unnecessary network hop
-        String localHost = feEndpoint.getUri().getHost();
-        int localPort = feEndpoint.getUri().getPort();
-        if (feHost.equals(localHost) && fePort == localPort) {
-            getStreamResultFromFE(token, queryId, listener);
+        if (ticketManager.isLocalFE(ticket)) {
+            getStreamResultFromFE(ticket.getToken(), ticket.getQueryId(), listener);
             return;
         }
 
-        ByteString ticketHandle = ByteString.copyFromUtf8(token + "|" + queryId);
-        getStreamResultFromRemoteNode(feHost, fePort, ticketHandle, token, "FE", listener);
+        ByteString ticketHandle = ByteString.copyFromUtf8(ticket.getToken() + "|" + ticket.getQueryId());
+        getStreamResultFromRemoteNode(ticket.getHost(), ticket.getPort(), ticketHandle, ticket.getToken(), "FE", listener);
     }
 
     private void getStreamResultFromRemoteNode(String host, int port,
@@ -685,48 +663,7 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
     }
 
     protected Pair<Location, ByteString> getFEEndpoint(ArrowFlightSqlConnectContext ctx) throws InvalidConfException {
-        ByteString handle;
-        Location endpoint;
-        SessionVariable globalSv = getGlobalProxySessionVariable();
-
-        if (globalSv.isArrowFlightProxyEnabled()) {
-            String arrowFlightProxy = globalSv.getArrowFlightProxy();
-            // FE Proxy Ticket: <Token>|<QueryId>|<FEHost>:<FEPort>
-            String feHost = feEndpoint.getUri().getHost();
-            int fePort = feEndpoint.getUri().getPort();
-            handle = ByteString.copyFromUtf8(ctx.getArrowFlightSqlToken() + "|"
-                    + DebugUtil.printId(ctx.getExecutionId()) + "|"
-                    + feHost + ":" + fePort);
-
-            if (!arrowFlightProxy.isEmpty()) {
-                endpoint = getProxyLocation(arrowFlightProxy);
-            } else {
-                endpoint = feEndpoint;
-            }
-        } else {
-            // FE Local Ticket: <Token>|<QueryId>
-            handle = ByteString.copyFromUtf8(ctx.getArrowFlightSqlToken() + "|" + DebugUtil.printId(ctx.getExecutionId()));
-            endpoint = feEndpoint;
-        }
-
-        return new Pair<>(endpoint, handle);
-    }
-
-    private static ByteString buildBETicket(String queryId, String rootFragmentInstanceId) {
-        return ByteString.copyFromUtf8(queryId + ":" + rootFragmentInstanceId);
-    }
-
-    private static ByteString buildBETicket(TUniqueId queryId, TUniqueId rootFragmentInstanceId) {
-        // BETicket: <QueryId> : <FragmentInstanceId>
-        return buildBETicket(hexStringFromUniqueId(queryId), hexStringFromUniqueId(rootFragmentInstanceId));
-    }
-
-    private static ByteString buildFEProxyTicket(TUniqueId queryId, TUniqueId rootFragmentInstanceId, ComputeNode worker) {
-        // Proxy Ticket: <QueryId> : <FragmentInstanceId> : Worker Hostname : Port
-        return ByteString.copyFromUtf8(hexStringFromUniqueId(queryId) + "|" 
-                        + hexStringFromUniqueId(rootFragmentInstanceId) + "|" 
-                        + worker.getHost() + "|" 
-                        + worker.getArrowFlightPort());
+        return ticketManager.getFEEndpoint(ctx);
     }
 
     private <T extends Message> FlightInfo buildFlightInfoFromFE(T request, FlightDescriptor descriptor,
@@ -761,108 +698,22 @@ public class ArrowFlightSqlServiceImpl implements FlightSqlProducer, AutoCloseab
         return new Schema(arrowFields);
     }
 
-    private static String hexStringFromUniqueId(final TUniqueId id) {
-        if (id == null) {
-            return "";
-        }
-        return Long.toHexString(id.hi) + "-" + Long.toHexString(id.lo);
-    }
-
-    private static void validateProxyFormat(String arrowFlightProxy) throws InvalidConfException {
-        if (arrowFlightProxy.isEmpty()) {
-            return;
-        }
-
-        String hostPort = arrowFlightProxy;
-        // Strip scheme if present (grpcs:// or grpc://)
-        if (arrowFlightProxy.startsWith("grpcs://")) {
-            hostPort = arrowFlightProxy.substring("grpcs://".length());
-        } else if (arrowFlightProxy.startsWith("grpc://")) {
-            hostPort = arrowFlightProxy.substring("grpc://".length());
-        }
-
-        String[] split = hostPort.split(":");
-        if (split.length != 2) {
-            throw new InvalidConfException(
-                    String.format("Expected format 'hostname:port' or 'grpcs://hostname:port', got '%s'", arrowFlightProxy));
-        }
-
-        if (split[0].isEmpty()) {
-            throw new InvalidConfException(
-                    String.format("Hostname cannot be empty, got '%s'", arrowFlightProxy));
-        }
-
-        try {
-            int port = Integer.parseInt(split[1]);
-            if (port < 1 || port > 65535) {
-                throw new InvalidConfException(
-                        String.format("Port must be between 1 and 65535, got '%d'", port));
-            }
-        } catch (NumberFormatException e) {
-            throw new InvalidConfException(
-                    String.format("Port must be a valid integer, got '%s'", split[1]));
-        }
-    }
-
-    private Location getProxyLocation(String arrowFlightProxy) throws InvalidConfException {
-        validateProxyFormat(arrowFlightProxy);
-
-        boolean useTls = arrowFlightProxy.startsWith("grpcs://");
-        String hostPort = arrowFlightProxy;
-
-        // Strip scheme if present
-        if (arrowFlightProxy.startsWith("grpcs://")) {
-            hostPort = arrowFlightProxy.substring("grpcs://".length());
-        } else if (arrowFlightProxy.startsWith("grpc://")) {
-            hostPort = arrowFlightProxy.substring("grpc://".length());
-        }
-
-        String[] split = hostPort.split(":");
-        String host = split[0];
-        int port = Integer.parseInt(split[1]);
-
-        if (useTls) {
-            return Location.forGrpcTls(host, port);
-        }
-        return Location.forGrpcInsecure(host, port);
-    }
-
+    /**
+     * Factory method to create the TicketManager. Override in tests to provide custom behavior.
+     */
     @VisibleForTesting
-    protected SessionVariable getGlobalProxySessionVariable() {
-        return GlobalStateMgr.getCurrentState().getVariableMgr().getDefaultSessionVariable();
+    protected ArrowFlightSqlTicketManager createTicketManager(Location feEndpoint) {
+        return new ArrowFlightSqlTicketManager(feEndpoint);
     }
 
     protected Location getFELocation() throws InvalidConfException {
-        SessionVariable globalSv = getGlobalProxySessionVariable();
-        if (globalSv.isArrowFlightProxyEnabled()) {
-            String arrowFlightProxy = globalSv.getArrowFlightProxy();
-            if (!arrowFlightProxy.isEmpty()) {
-                return getProxyLocation(arrowFlightProxy);
-            }
-        }
-        return feEndpoint;
+        return ticketManager.getFELocation();
     }
 
     protected Pair<Location, ByteString> getBEEndpoint(TUniqueId queryId, ComputeNode worker,
                                                        TUniqueId rootFragmentInstanceId)
                                                        throws InvalidConfException {
-        ByteString handle;
-        Location endpoint;
-        SessionVariable globalSv = getGlobalProxySessionVariable();
-        if (globalSv.isArrowFlightProxyEnabled()) {
-            String arrowFlightProxy = globalSv.getArrowFlightProxy();
-            handle = buildFEProxyTicket(queryId, rootFragmentInstanceId, worker);
-            if (arrowFlightProxy.isEmpty()) { // route to FE
-                endpoint = feEndpoint;
-            } else { // route to defined proxy
-                endpoint = getProxyLocation(arrowFlightProxy);
-            }
-        } else { // route directly to BE
-            handle = buildBETicket(queryId, rootFragmentInstanceId);
-            endpoint = Location.forGrpcInsecure(worker.getHost(), worker.getArrowFlightPort());
-        }
-
-        return new Pair<>(endpoint, handle);
+        return ticketManager.getBEEndpoint(queryId, worker, rootFragmentInstanceId);
     }
 
     @VisibleForTesting

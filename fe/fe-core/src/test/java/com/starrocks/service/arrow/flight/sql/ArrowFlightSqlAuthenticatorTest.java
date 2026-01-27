@@ -14,9 +14,7 @@
 
 package com.starrocks.service.arrow.flight.sql;
 
-import com.starrocks.qe.SessionVariable;
-import com.starrocks.qe.VariableMgr;
-import com.starrocks.server.GlobalStateMgr;
+import com.starrocks.qe.GlobalVariable;
 import com.starrocks.service.arrow.flight.sql.auth2.ArrowFlightSqlAuthenticator;
 import com.starrocks.service.arrow.flight.sql.session.ArrowFlightSqlSessionManager;
 import org.apache.arrow.flight.CallHeaders;
@@ -77,17 +75,8 @@ class ArrowFlightSqlAuthenticatorTest {
 
         doThrow(new IllegalArgumentException("Invalid token")).when(sessionManager).validateToken("bad-token");
 
-        SessionVariable mockSv = mock(SessionVariable.class);
-        when(mockSv.isArrowFlightProxyEnabled()).thenReturn(false);
-
-        VariableMgr mockVariableMgr = mock(VariableMgr.class);
-        when(mockVariableMgr.getDefaultSessionVariable()).thenReturn(mockSv);
-
-        GlobalStateMgr mockGlobalStateMgr = mock(GlobalStateMgr.class);
-        when(mockGlobalStateMgr.getVariableMgr()).thenReturn(mockVariableMgr);
-
-        try (MockedStatic<GlobalStateMgr> mockedStatic = mockStatic(GlobalStateMgr.class)) {
-            mockedStatic.when(GlobalStateMgr::getCurrentState).thenReturn(mockGlobalStateMgr);
+        try (MockedStatic<GlobalVariable> mockedStatic = mockStatic(GlobalVariable.class)) {
+            mockedStatic.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(false);
 
             CallHeaders headers = mock(CallHeaders.class);
             when(headers.get(Auth2Constants.AUTHORIZATION_HEADER)).thenReturn(Auth2Constants.BEARER_PREFIX + "bad-token");
@@ -105,17 +94,8 @@ class ArrowFlightSqlAuthenticatorTest {
         // Token not found in local cache
         doThrow(new IllegalArgumentException("Invalid token")).when(sessionManager).validateToken("remote-token");
 
-        SessionVariable mockSv = mock(SessionVariable.class);
-        when(mockSv.isArrowFlightProxyEnabled()).thenReturn(true);
-
-        VariableMgr mockVariableMgr = mock(VariableMgr.class);
-        when(mockVariableMgr.getDefaultSessionVariable()).thenReturn(mockSv);
-
-        GlobalStateMgr mockGlobalStateMgr = mock(GlobalStateMgr.class);
-        when(mockGlobalStateMgr.getVariableMgr()).thenReturn(mockVariableMgr);
-
-        try (MockedStatic<GlobalStateMgr> mockedStatic = mockStatic(GlobalStateMgr.class)) {
-            mockedStatic.when(GlobalStateMgr::getCurrentState).thenReturn(mockGlobalStateMgr);
+        try (MockedStatic<GlobalVariable> mockedStatic = mockStatic(GlobalVariable.class)) {
+            mockedStatic.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
 
             CallHeaders headers = mock(CallHeaders.class);
             when(headers.get(Auth2Constants.AUTHORIZATION_HEADER)).thenReturn(Auth2Constants.BEARER_PREFIX + "remote-token");
