@@ -51,11 +51,11 @@ public class ArrowFlightSqlTicketManager {
     private final Location feEndpoint;
 
     public enum TicketType {
-        /** FE local ticket: Token|QueryId */
+        // FE local ticket: Token|QueryId
         FE_LOCAL,
-        /** FE proxy ticket: Token|QueryId|FEHost:FEPort */
+        // FE proxy ticket: Token|QueryId|FEHost:FEPort
         FE_PROXY,
-        /** BE proxy ticket: QueryId|FragmentInstanceId|BEHost|BEPort */
+        //BE proxy ticket: QueryId|FragmentInstanceId|BEHost|BEPort
         BE_PROXY
     }
 
@@ -131,13 +131,10 @@ public class ArrowFlightSqlTicketManager {
         switch (ticketParts.length) {
             case 2:
                 return ParsedTicket.feLocal(ticketParts[0], ticketParts[1]);
-
             case 3:
                 return parseFEProxyTicket(ticketParts);
-
             case 4:
                 return parseBEProxyTicket(ticketParts);
-
             default:
                 throw CallStatus.INVALID_ARGUMENT.withDescription(
                         String.format("Invalid ticket format: expected 2, 3, or 4 parts, got [%d]",
@@ -149,7 +146,7 @@ public class ArrowFlightSqlTicketManager {
         String[] hostPort;
         try {
             hostPort = NetUtils.resolveHostInfoFromHostPort(ticketParts[2]);
-        } catch (AnalysisException e) {
+        } catch (AnalysisException e) { // deprecated, but NetUtils uses
             throw CallStatus.INVALID_ARGUMENT.withDescription(
                     "Invalid FE host:port format: " + ticketParts[2]).toRuntimeException();
         }
@@ -220,7 +217,6 @@ public class ArrowFlightSqlTicketManager {
     /**
      * Gets the FE endpoint and ticket handle for FE tasks.
      *
-     * @param ctx the connection context
      * @return a pair of (endpoint location, ticket handle)
      */
     public Pair<Location, ByteString> getFEEndpoint(ArrowFlightSqlConnectContext ctx)
@@ -248,9 +244,6 @@ public class ArrowFlightSqlTicketManager {
     /**
      * Gets the BE endpoint and ticket handle for BE tasks.
      *
-     * @param queryId the query ID
-     * @param worker the compute node to route to
-     * @param rootFragmentInstanceId the fragment instance ID
      * @return a pair of (endpoint location, ticket handle)
      */
     public Pair<Location, ByteString> getBEEndpoint(TUniqueId queryId, ComputeNode worker,
@@ -285,12 +278,6 @@ public class ArrowFlightSqlTicketManager {
         return feEndpoint;
     }
 
-    /**
-     * Parses a proxy configuration string to a Location.
-     *
-     * @param arrowFlightProxy the proxy string (e.g., "host:port" or "grpcs://host:port")
-     * @return the Location for the proxy
-     */
     public Location getProxyLocation(String arrowFlightProxy) throws InvalidConfException {
         validateProxyFormat(arrowFlightProxy);
 
@@ -307,7 +294,7 @@ public class ArrowFlightSqlTicketManager {
         String[] hostPort;
         try {
             hostPort = NetUtils.resolveHostInfoFromHostPort(hostPortStr);
-        } catch (AnalysisException e) {
+        } catch (AnalysisException e) { // deprecated, but NetUtils uses
             throw new InvalidConfException(e.getMessage());
         }
         int port = Integer.parseInt(hostPort[1]);
@@ -334,7 +321,7 @@ public class ArrowFlightSqlTicketManager {
         String[] hostPort;
         try {
             hostPort = NetUtils.resolveHostInfoFromHostPort(hostPortStr);
-        } catch (AnalysisException e) {
+        } catch (AnalysisException e) { // deprecated, but NetUtils uses
             throw new InvalidConfException(
                     String.format("Expected format 'hostname:port' or 'grpcs://hostname:port', got '%s'",
                             arrowFlightProxy));
@@ -357,9 +344,6 @@ public class ArrowFlightSqlTicketManager {
         }
     }
 
-    /**
-     * Gets the internal FE endpoint (used for routing decisions).
-     */
     public Location getInternalFEEndpoint() {
         return feEndpoint;
     }
