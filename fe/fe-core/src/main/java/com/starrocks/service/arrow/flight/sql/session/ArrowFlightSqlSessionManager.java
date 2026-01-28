@@ -31,6 +31,7 @@ import com.starrocks.qe.GlobalVariable;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.service.ExecuteEnv;
 import com.starrocks.service.arrow.flight.sql.ArrowFlightSqlConnectContext;
+import com.starrocks.system.Frontend;
 import org.apache.arrow.flight.CallStatus;
 import org.apache.arrow.flight.FlightRuntimeException;
 import org.apache.commons.lang3.StringUtils;
@@ -133,10 +134,6 @@ public class ArrowFlightSqlSessionManager {
         return connectContext;
     }
 
-    /**
-     * Check if a token was issued by this FE node.
-     * When proxy is enabled, tokens contain the FE host prefix.
-     */
     public boolean isLocalToken(String token) {
         if (!GlobalVariable.isArrowFlightProxyEnabled()) {
             return true;  // Without proxy, all tokens are local
@@ -163,6 +160,22 @@ public class ArrowFlightSqlSessionManager {
             return null;  // No host prefix or invalid format
         }
         return token.substring(0, colonIndex);
+    }
+
+    /**
+     * Validate that a host is a known FE in the cluster.
+     * This prevents forwarding requests to arbitrary/malicious hosts.
+     */
+    public static boolean isValidFeHost(String host) {
+        if (StringUtils.isEmpty(host)) {
+            return false;
+        }
+        for (Frontend fe : GlobalStateMgr.getCurrentState().getNodeMgr().getFrontends(null)) {
+            if (host.equals(fe.getHost())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
