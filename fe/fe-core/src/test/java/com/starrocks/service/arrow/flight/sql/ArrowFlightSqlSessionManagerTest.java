@@ -288,7 +288,7 @@ public class ArrowFlightSqlSessionManagerTest {
     @Test
     public void testIsLocalToken_proxyEnabled_localToken() {
         try (MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-             MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
+                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
 
             mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
 
@@ -307,7 +307,7 @@ public class ArrowFlightSqlSessionManagerTest {
     @Test
     public void testIsLocalToken_proxyEnabled_remoteToken() {
         try (MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-             MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
+                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
 
             mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
 
@@ -326,7 +326,7 @@ public class ArrowFlightSqlSessionManagerTest {
     @Test
     public void testIsLocalToken_proxyEnabled_legacyToken() {
         try (MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-             MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
+                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
 
             mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
 
@@ -345,10 +345,10 @@ public class ArrowFlightSqlSessionManagerTest {
     @Test
     public void testInitializeSession_proxyEnabled_tokenIncludesFeHost() {
         try (MockedStatic<ExecuteEnv> mockedEnv = mockStatic(ExecuteEnv.class);
-             MockedStatic<UUIDUtil> mockedUUID = mockStatic(UUIDUtil.class);
-             MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class);
-             MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-             MockedStatic<AuthenticationHandler> mockedAuth = mockStatic(AuthenticationHandler.class)) {
+                 MockedStatic<UUIDUtil> mockedUUID = mockStatic(UUIDUtil.class);
+                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class);
+                 MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
+                 MockedStatic<AuthenticationHandler> mockedAuth = mockStatic(AuthenticationHandler.class)) {
 
             mockAuthentication(mockedAuth);
             mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
@@ -393,10 +393,10 @@ public class ArrowFlightSqlSessionManagerTest {
     @Test
     public void testInitializeSession_proxyDisabled_tokenIsPlainUuid() {
         try (MockedStatic<ExecuteEnv> mockedEnv = mockStatic(ExecuteEnv.class);
-             MockedStatic<UUIDUtil> mockedUUID = mockStatic(UUIDUtil.class);
-             MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class);
-             MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-             MockedStatic<AuthenticationHandler> mockedAuth = mockStatic(AuthenticationHandler.class)) {
+                 MockedStatic<UUIDUtil> mockedUUID = mockStatic(UUIDUtil.class);
+                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class);
+                 MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
+                 MockedStatic<AuthenticationHandler> mockedAuth = mockStatic(AuthenticationHandler.class)) {
 
             mockAuthentication(mockedAuth);
             mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(false);
