@@ -30,12 +30,14 @@ import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.NodeMgr;
 import com.starrocks.service.ExecuteEnv;
 import com.starrocks.service.arrow.flight.sql.session.ArrowFlightSqlSessionManager;
+import com.starrocks.system.Frontend;
 import com.starrocks.thrift.TUniqueId;
 import org.apache.arrow.flight.FlightRuntimeException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
+import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
@@ -145,7 +147,7 @@ public class ArrowFlightSqlSessionManagerTest {
     }
 
     @Test
-    public void testValidateToken_success() {
+    public void testValidateToken() {
         try (MockedStatic<ExecuteEnv> mockedEnv = mockStatic(ExecuteEnv.class);
                 MockedStatic<UUIDUtil> mockedUUID = mockStatic(UUIDUtil.class);
                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class);
@@ -166,18 +168,11 @@ public class ArrowFlightSqlSessionManagerTest {
 
             String token = sessionManager.initializeSession("testUser", "127.0.0.1", "testPassword");
             assertDoesNotThrow(() -> sessionManager.validateToken(token));
+
+            assertThrows(IllegalArgumentException.class, () -> sessionManager.validateToken(null));
+            assertThrows(IllegalArgumentException.class, () -> sessionManager.validateToken(""));
+            assertThrows(IllegalArgumentException.class, () -> sessionManager.validateToken("non-exist-token"));
         }
-    }
-
-    @Test
-    public void testValidateToken_emptyOrNull() {
-        assertThrows(IllegalArgumentException.class, () -> sessionManager.validateToken(null));
-        assertThrows(IllegalArgumentException.class, () -> sessionManager.validateToken(""));
-    }
-
-    @Test
-    public void testValidateToken_invalidToken() {
-        assertThrows(IllegalArgumentException.class, () -> sessionManager.validateToken("non-exist-token"));
     }
 
     @Test
@@ -233,62 +228,33 @@ public class ArrowFlightSqlSessionManagerTest {
         }
     }
 
-    // ==================== Token Format Tests for Multi-FE Proxy ====================
-
     @Test
-    public void testExtractFeHost_validTokenWithHost() {
-        // Token format: "FE_HOST:UUID"
-        String token = "fe1.example.com:123e4567-e89b-12d3-a456-426614174000";
-        String feHost = ArrowFlightSqlSessionManager.extractFeHost(token);
-        assertEquals("fe1.example.com", feHost);
-    }
-
-    @Test
-    public void testExtractFeHost_tokenWithIpAddress() {
-        String token = "10.0.1.107:123e4567-e89b-12d3-a456-426614174000";
-        String feHost = ArrowFlightSqlSessionManager.extractFeHost(token);
-        assertEquals("10.0.1.107", feHost);
-    }
-
-    @Test
-    public void testExtractFeHost_legacyTokenWithoutHost() {
-        // Legacy token format (no host prefix): "UUID" - contains colons but not as host separator
-        // UUID format: 123e4567-e89b-12d3-a456-426614174000 (no colons)
-        String token = "123e4567-e89b-12d3-a456-426614174000";
-        String feHost = ArrowFlightSqlSessionManager.extractFeHost(token);
-        // UUID without colon returns null (indexOf(':') returns -1)
-        assertNull(feHost);
-    }
-
-    @Test
-    public void testExtractFeHost_emptyToken() {
+    public void testExtractFeHost() {
+        assertEquals("fe1.example.com",
+                ArrowFlightSqlSessionManager.extractFeHost("fe1.example.com:123e4567-e89b-12d3-a456-426614174000"));
+        assertEquals("127.0.0.1",
+                ArrowFlightSqlSessionManager.extractFeHost("127.0.0.1:123e4567-e89b-12d3-a456-426614174000"));
+        assertNull(ArrowFlightSqlSessionManager.extractFeHost("123e4567-e89b-12d3-a456-426614174000"));
+        assertNull(ArrowFlightSqlSessionManager.extractFeHost("simpletoken"));
         assertNull(ArrowFlightSqlSessionManager.extractFeHost(""));
         assertNull(ArrowFlightSqlSessionManager.extractFeHost(null));
     }
 
     @Test
-    public void testExtractFeHost_tokenWithoutColon() {
-        // Token without colon should return null (no host prefix)
-        String token = "simpletoken";
-        String feHost = ArrowFlightSqlSessionManager.extractFeHost(token);
-        assertNull(feHost);
-    }
-
-    @Test
     public void testIsLocalToken_proxyDisabled() {
-        // When proxy is disabled, all tokens are considered local
         try (MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class)) {
             mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(false);
 
+            // When proxy is disabled, all tokens are considered local
             assertTrue(sessionManager.isLocalToken("any-token"));
             assertTrue(sessionManager.isLocalToken("fe1.example.com:some-uuid"));
         }
     }
 
     @Test
-    public void testIsLocalToken_proxyEnabled_localToken() {
+    public void testIsLocalToken_proxyEnabled() {
         try (MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
+                MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
 
             mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
 
@@ -296,62 +262,49 @@ public class ArrowFlightSqlSessionManagerTest {
             NodeMgr mockNodeMgr = mock(NodeMgr.class);
             mockedGlobalState.when(GlobalStateMgr::getCurrentState).thenReturn(mockGlobalState);
             when(mockGlobalState.getNodeMgr()).thenReturn(mockNodeMgr);
-            when(mockNodeMgr.getSelfNode()).thenReturn(Pair.create("10.0.1.107", 9010));
+            when(mockNodeMgr.getSelfNode()).thenReturn(Pair.create("127.0.0.1", 9010));
 
-            // Token from this FE
-            String localToken = "10.0.1.107:123e4567-e89b-12d3-a456-426614174000";
-            assertTrue(sessionManager.isLocalToken(localToken));
+            assertTrue(sessionManager.isLocalToken("127.0.0.1:123e4567-e89b-12d3-a456-426614174000"));
+            assertFalse(sessionManager.isLocalToken("127.0.0.2:123e4567-e89b-12d3-a456-426614174000"));
+            assertTrue(sessionManager.isLocalToken("simpletoken"));
         }
     }
 
     @Test
-    public void testIsLocalToken_proxyEnabled_remoteToken() {
-        try (MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
-
-            mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
-
+    public void testIsValidFeHost() {
+        try (MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
             GlobalStateMgr mockGlobalState = mock(GlobalStateMgr.class);
             NodeMgr mockNodeMgr = mock(NodeMgr.class);
+            Frontend mockFe1 = mock(Frontend.class);
+            Frontend mockFe2 = mock(Frontend.class);
+            Frontend mockFe3 = mock(Frontend.class);
+
             mockedGlobalState.when(GlobalStateMgr::getCurrentState).thenReturn(mockGlobalState);
             when(mockGlobalState.getNodeMgr()).thenReturn(mockNodeMgr);
-            when(mockNodeMgr.getSelfNode()).thenReturn(Pair.create("10.0.1.107", 9010));
+            when(mockNodeMgr.getFrontends(null)).thenReturn(List.of(mockFe1, mockFe2, mockFe3));
+            when(mockFe1.getHost()).thenReturn("127.0.0.1");
+            when(mockFe2.getHost()).thenReturn("127.0.0.2");
+            when(mockFe3.getHost()).thenReturn("127.0.0.3");
 
-            // Token from different FE
-            String remoteToken = "10.0.6.7:123e4567-e89b-12d3-a456-426614174000";
-            assertFalse(sessionManager.isLocalToken(remoteToken));
+            assertTrue(ArrowFlightSqlSessionManager.isValidFeHost("127.0.0.1"));
+            assertTrue(ArrowFlightSqlSessionManager.isValidFeHost("127.0.0.2"));
+            assertTrue(ArrowFlightSqlSessionManager.isValidFeHost("127.0.0.3"));
+            assertFalse(ArrowFlightSqlSessionManager.isValidFeHost("malicious.host.com"));
+            assertFalse(ArrowFlightSqlSessionManager.isValidFeHost("127.0.0.99"));
+            assertFalse(ArrowFlightSqlSessionManager.isValidFeHost(""));
+            assertFalse(ArrowFlightSqlSessionManager.isValidFeHost(null));
         }
     }
 
     @Test
-    public void testIsLocalToken_proxyEnabled_legacyToken() {
-        try (MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class)) {
-
-            mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
-
-            GlobalStateMgr mockGlobalState = mock(GlobalStateMgr.class);
-            NodeMgr mockNodeMgr = mock(NodeMgr.class);
-            mockedGlobalState.when(GlobalStateMgr::getCurrentState).thenReturn(mockGlobalState);
-            when(mockGlobalState.getNodeMgr()).thenReturn(mockNodeMgr);
-            when(mockNodeMgr.getSelfNode()).thenReturn(Pair.create("10.0.1.107", 9010));
-
-            // Legacy token without host prefix - should be treated as local
-            String legacyToken = "simpletoken";
-            assertTrue(sessionManager.isLocalToken(legacyToken));
-        }
-    }
-
-    @Test
-    public void testInitializeSession_proxyEnabled_tokenIncludesFeHost() {
+    public void testInitializeSession_tokenFormat() {
         try (MockedStatic<ExecuteEnv> mockedEnv = mockStatic(ExecuteEnv.class);
-                 MockedStatic<UUIDUtil> mockedUUID = mockStatic(UUIDUtil.class);
-                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class);
-                 MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-                 MockedStatic<AuthenticationHandler> mockedAuth = mockStatic(AuthenticationHandler.class)) {
+                MockedStatic<UUIDUtil> mockedUUID = mockStatic(UUIDUtil.class);
+                MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class);
+                MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
+                MockedStatic<AuthenticationHandler> mockedAuth = mockStatic(AuthenticationHandler.class)) {
 
             mockAuthentication(mockedAuth);
-            mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
 
             ExecuteEnv mockEnv = mock(ExecuteEnv.class);
             mockedEnv.when(ExecuteEnv::getInstance).thenReturn(mockEnv);
@@ -371,7 +324,7 @@ public class ArrowFlightSqlSessionManagerTest {
 
             mockedGlobalState.when(GlobalStateMgr::getCurrentState).thenReturn(mockGlobalState);
             when(mockGlobalState.getNodeMgr()).thenReturn(mockNodeMgr);
-            when(mockNodeMgr.getSelfNode()).thenReturn(Pair.create("10.0.1.107", 9010));
+            when(mockNodeMgr.getSelfNode()).thenReturn(Pair.create("127.0.0.1", 9010));
             when(mockGlobalState.getVariableMgr()).thenReturn(mockVariableMgr);
             when(mockVariableMgr.newSessionVariable()).thenReturn(mockSessionVariable);
             when(mockGlobalState.getAuthorizationMgr()).thenReturn(mockAuthMgr);
@@ -381,41 +334,18 @@ public class ArrowFlightSqlSessionManagerTest {
                 throw new RuntimeException(e);
             }
 
-            String token = sessionManager.initializeSession("testUser", "127.0.0.1", "testPassword");
-            assertNotNull(token);
-            // Token should start with FE host
-            assertTrue(token.startsWith("10.0.1.107:"), "Token should include FE host prefix");
-            // Token should contain UUID
-            assertTrue(token.contains(mockUUID.toString()), "Token should contain UUID");
-        }
-    }
+            // Test with proxy enabled - token includes FE host prefix
+            mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(true);
+            String tokenWithProxy = sessionManager.initializeSession("testUser", "127.0.0.1", "testPassword");
+            assertNotNull(tokenWithProxy);
+            assertTrue(tokenWithProxy.startsWith("127.0.0.1:"), "Token should include FE host prefix");
+            assertTrue(tokenWithProxy.contains(mockUUID.toString()), "Token should contain UUID");
 
-    @Test
-    public void testInitializeSession_proxyDisabled_tokenIsPlainUuid() {
-        try (MockedStatic<ExecuteEnv> mockedEnv = mockStatic(ExecuteEnv.class);
-                 MockedStatic<UUIDUtil> mockedUUID = mockStatic(UUIDUtil.class);
-                 MockedStatic<GlobalStateMgr> mockedGlobalState = mockStatic(GlobalStateMgr.class);
-                 MockedStatic<GlobalVariable> mockedGlobalVar = mockStatic(GlobalVariable.class);
-                 MockedStatic<AuthenticationHandler> mockedAuth = mockStatic(AuthenticationHandler.class)) {
-
-            mockAuthentication(mockedAuth);
+            // Test with proxy disabled - token is plain UUID
             mockedGlobalVar.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(false);
-
-            ExecuteEnv mockEnv = mock(ExecuteEnv.class);
-            mockedEnv.when(ExecuteEnv::getInstance).thenReturn(mockEnv);
-            when(mockEnv.getScheduler()).thenReturn(mockScheduler);
-            when(mockScheduler.getNextConnectionId()).thenReturn(123);
-            when(mockScheduler.registerConnection(any())).thenReturn(Pair.create(true, ""));
-
-            mockedUUID.when(UUIDUtil::genUUID).thenReturn(mockUUID);
-            mockedUUID.when(() -> UUIDUtil.toTUniqueId(mockUUID)).thenReturn(mockTUniqueId);
-
-            mockGlobalStateMgr(mockedGlobalState);
-
-            String token = sessionManager.initializeSession("testUser", "127.0.0.1", "testPassword");
-            assertNotNull(token);
-            // Token should be plain UUID without host prefix
-            assertEquals(mockUUID.toString(), token, "Token should be plain UUID when proxy is disabled");
+            String tokenWithoutProxy = sessionManager.initializeSession("testUser", "127.0.0.1", "testPassword");
+            assertNotNull(tokenWithoutProxy);
+            assertEquals(mockUUID.toString(), tokenWithoutProxy, "Token should be plain UUID when proxy disabled");
         }
     }
 }
