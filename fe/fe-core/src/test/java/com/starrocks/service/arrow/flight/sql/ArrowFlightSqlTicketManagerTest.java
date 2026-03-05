@@ -300,6 +300,38 @@ public class ArrowFlightSqlTicketManagerTest {
     }
 
     @Test
+    public void testBuildFEProxyTicketEmbedsTlsScheme() {
+        ArrowFlightSqlTicketManager tlsManager =
+                new ArrowFlightSqlTicketManager(Location.forGrpcTls("fe-a", 9408));
+        String tlsTicket = tlsManager.buildFEProxyTicket("token", new TUniqueId(1L, 2L)).toStringUtf8();
+        assertTrue(tlsTicket.endsWith("|grpcs://fe-a:9408"), "TLS FE must embed grpcs:// scheme, got: " + tlsTicket);
+
+        ArrowFlightSqlTicketManager plainManager =
+                new ArrowFlightSqlTicketManager(Location.forGrpcInsecure("fe-b", 9408));
+        String plainTicket = plainManager.buildFEProxyTicket("token", new TUniqueId(1L, 2L)).toStringUtf8();
+        assertTrue(plainTicket.endsWith("|fe-b:9408"), "Non-TLS FE must emit bare host:port (no scheme), got: " + plainTicket);
+        assertFalse(plainTicket.contains("grpc://"), "Non-TLS ticket must not contain grpc:// to stay backward compatible");
+    }
+
+    @Test
+    public void testParseFEProxyTicketExtractsTlsScheme() {
+        ArrowFlightSqlTicketManager.ParsedTicket tlsTicket =
+                ticketManager.parseTicket("token|queryId|grpcs://fe-host:9408");
+        assertEquals(ArrowFlightSqlTicketManager.TicketType.FE_PROXY, tlsTicket.getType());
+        assertEquals("fe-host", tlsTicket.getHost());
+        assertEquals(9408, tlsTicket.getPort());
+        assertTrue(tlsTicket.isUseTls(), "grpcs:// prefix must set useTls=true");
+
+        ArrowFlightSqlTicketManager.ParsedTicket plainTicket =
+                ticketManager.parseTicket("token|queryId|grpc://fe-host:9408");
+        assertFalse(plainTicket.isUseTls(), "grpc:// prefix must set useTls=false");
+
+        ArrowFlightSqlTicketManager.ParsedTicket legacyTicket =
+                ticketManager.parseTicket("token|queryId|fe-host:9408");
+        assertFalse(legacyTicket.isUseTls(), "Legacy ticket with no scheme must default to useTls=false");
+    }
+
+    @Test
     public void testGetFELocation() throws Exception {
         try (MockedStatic<GlobalVariable> mocked = mockStatic(GlobalVariable.class)) {
             mocked.when(GlobalVariable::isArrowFlightProxyEnabled).thenReturn(false);

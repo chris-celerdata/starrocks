@@ -341,7 +341,7 @@ public class ArrowFlightSqlServiceImplTest {
         FlightStream mockBeStream = mock(FlightStream.class);
         VectorSchemaRoot mockRoot = mock(VectorSchemaRoot.class);
 
-        service.addToCacheForTesting("127.0.0.1:9400", mockBeClient);
+        service.addToCacheForTesting("grpc://127.0.0.1:9400", mockBeClient);
 
         when(mockBeClient.getStream(any(Ticket.class))).thenReturn(mockBeStream);
         when(mockBeStream.getRoot()).thenReturn(mockRoot);
@@ -360,7 +360,7 @@ public class ArrowFlightSqlServiceImplTest {
         verify(listener).completed();
         verify(mockBeStream).close();
 
-        assertEquals(service.getClientFromCacheForTesting("127.0.0.1:9400"), mockBeClient);
+        assertEquals(service.getClientFromCacheForTesting("grpc://127.0.0.1:9400"), mockBeClient);
     }
 
     @Test
@@ -369,7 +369,7 @@ public class ArrowFlightSqlServiceImplTest {
         FlightStream mockBeStream = mock(FlightStream.class);
         VectorSchemaRoot mockRoot = mock(VectorSchemaRoot.class);
 
-        service.addToCacheForTesting("127.0.0.1:9400", mockBeClient);
+        service.addToCacheForTesting("grpc://127.0.0.1:9400", mockBeClient);
 
         when(mockBeClient.getStream(any(Ticket.class))).thenReturn(mockBeStream);
         when(mockBeStream.getRoot()).thenReturn(mockRoot);
@@ -393,7 +393,7 @@ public class ArrowFlightSqlServiceImplTest {
         cancelHandlerCaptor.getValue().run();
         verify(mockBeStream).cancel("Client cancelled request", null);
 
-        assertEquals(service.getClientFromCacheForTesting("127.0.0.1:9400"), mockBeClient);
+        assertEquals(service.getClientFromCacheForTesting("grpc://127.0.0.1:9400"), mockBeClient);
     }
 
     @Test
@@ -402,7 +402,7 @@ public class ArrowFlightSqlServiceImplTest {
         FlightStream mockBeStream = mock(FlightStream.class);
         VectorSchemaRoot mockRoot = mock(VectorSchemaRoot.class);
 
-        service.addToCacheForTesting("127.0.0.1:9400", mockBeClient);
+        service.addToCacheForTesting("grpc://127.0.0.1:9400", mockBeClient);
 
         when(mockBeClient.getStream(any(Ticket.class))).thenReturn(mockBeStream);
         when(mockBeStream.getRoot()).thenReturn(mockRoot);
@@ -424,7 +424,7 @@ public class ArrowFlightSqlServiceImplTest {
         verify(mockBeStream).close();
 
         // client not removed from cache on error
-        assertEquals(service.getClientFromCacheForTesting("127.0.0.1:9400"), mockBeClient);
+        assertEquals(service.getClientFromCacheForTesting("grpc://127.0.0.1:9400"), mockBeClient);
     }
 
     @Test
@@ -461,6 +461,34 @@ public class ArrowFlightSqlServiceImplTest {
 
         // Verify getStream was called twice (initial + retry)
         verify(mockBeClient, org.mockito.Mockito.times(2)).getStream(any(Ticket.class));
+    }
+
+    @Test
+    public void testGetStreamResultFromFEProxyTicketWithTlsScheme() throws Exception {
+        // A ticket issued by a TLS-enabled FE embeds "grpcs://" in the host:port field.
+        // The receiving FE must use the "grpcs://host:port" cache key and connect with TLS.
+        FlightClient mockFeClient = mock(FlightClient.class);
+        FlightStream mockStream = mock(FlightStream.class);
+        VectorSchemaRoot mockRoot = mock(VectorSchemaRoot.class);
+
+        service.addToCacheForTesting("grpcs://fe-a:9408", mockFeClient);
+
+        when(mockFeClient.getStream(any(Ticket.class), any())).thenReturn(mockStream);
+        when(mockStream.getRoot()).thenReturn(mockRoot);
+        when(mockStream.next()).thenReturn(true).thenReturn(false);
+
+        String tlsProxyTicket = "some-uuid|some-query-id|grpcs://fe-a:9408";
+        FlightSql.TicketStatementQuery ticket = FlightSql.TicketStatementQuery.newBuilder()
+                .setStatementHandle(ByteString.copyFromUtf8(tlsProxyTicket))
+                .build();
+        FlightProducer.ServerStreamListener listener = mock(FlightProducer.ServerStreamListener.class);
+
+        service.getStreamStatement(ticket, mockCallContext, listener);
+
+        verify(listener).start(mockRoot);
+        verify(listener).putNext();
+        verify(listener).completed();
+        assertEquals(service.getClientFromCacheForTesting("grpcs://fe-a:9408"), mockFeClient);
     }
 
     @Test
@@ -617,12 +645,12 @@ public class ArrowFlightSqlServiceImplTest {
 
         FlightClient mockBeClient = mock(FlightClient.class);
 
-        service.addToCacheForTesting("127.0.0.1:9400", mockBeClient);
+        service.addToCacheForTesting("grpc://127.0.0.1:9400", mockBeClient);
 
         try {
             service.close();
             verify(mockBeClient).close();
-            assertNull(service.getClientFromCacheForTesting("127.0.0.1:9400"));
+            assertNull(service.getClientFromCacheForTesting("grpc://127.0.0.1:9400"));
         } catch (Exception ignored) {
 
         }
@@ -854,7 +882,7 @@ public class ArrowFlightSqlServiceImplTest {
         FlightStream mockBeStream = mock(FlightStream.class);
         VectorSchemaRoot mockRoot = mock(VectorSchemaRoot.class);
 
-        service.addToCacheForTesting("127.0.0.1:9400", mockBeClient);
+        service.addToCacheForTesting("grpc://127.0.0.1:9400", mockBeClient);
 
         when(mockBeClient.getStream(any(Ticket.class))).thenReturn(mockBeStream);
         when(mockBeStream.getRoot()).thenReturn(mockRoot);
@@ -949,7 +977,7 @@ public class ArrowFlightSqlServiceImplTest {
 
             FlightClient mockFeClient = mock(FlightClient.class);
             Config.arrow_flight_port = 9408;
-            testService.addToCacheForTesting("remote-fe:9408", mockFeClient);
+            testService.addToCacheForTesting("grpc://remote-fe:9408", mockFeClient);
 
             Result mockResult = mock(Result.class);
             java.util.Iterator<Result> mockIter = mock(java.util.Iterator.class);
@@ -990,7 +1018,7 @@ public class ArrowFlightSqlServiceImplTest {
 
             FlightClient mockFeClient = mock(FlightClient.class);
             Config.arrow_flight_port = 9408;
-            testService.addToCacheForTesting("remote-fe:9408", mockFeClient);
+            testService.addToCacheForTesting("grpc://remote-fe:9408", mockFeClient);
 
             java.util.Iterator<Result> emptyIter = mock(java.util.Iterator.class);
             when(emptyIter.hasNext()).thenReturn(false);
@@ -1028,7 +1056,7 @@ public class ArrowFlightSqlServiceImplTest {
 
             FlightClient mockFeClient = mock(FlightClient.class);
             Config.arrow_flight_port = 9408;
-            testService.addToCacheForTesting("remote-fe:9408", mockFeClient);
+            testService.addToCacheForTesting("grpc://remote-fe:9408", mockFeClient);
 
             SetSessionOptionsResult mockResult = new SetSessionOptionsResult(new HashMap<>());
             when(mockFeClient.setSessionOptions(any(SetSessionOptionsRequest.class), any()))
@@ -1098,7 +1126,7 @@ public class ArrowFlightSqlServiceImplTest {
 
             FlightClient mockFeClient = mock(FlightClient.class);
             Config.arrow_flight_port = 9408;
-            testService.addToCacheForTesting("remote-fe:9408", mockFeClient);
+            testService.addToCacheForTesting("grpc://remote-fe:9408", mockFeClient);
 
             when(mockFeClient.doAction(any(org.apache.arrow.flight.Action.class), any()))
                     .thenThrow(new RuntimeException("Network error"));
@@ -1134,7 +1162,7 @@ public class ArrowFlightSqlServiceImplTest {
             when(mockFeClient.getInfo(any(FlightDescriptor.class), any())).thenReturn(mockFlightInfo);
 
             Config.arrow_flight_port = 9408;
-            testService.addToCacheForTesting("remote-fe:9408", mockFeClient);
+            testService.addToCacheForTesting("grpc://remote-fe:9408", mockFeClient);
 
             FlightDescriptor descriptor = FlightDescriptor.command("".getBytes());
 

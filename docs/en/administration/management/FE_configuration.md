@@ -1025,6 +1025,33 @@ ADMIN SET FRONTEND CONFIG ("key" = "value");
 - Description: Sets the maximum number of worker threads in the AlterHandler's thread pool. The AlterHandler constructs the executor with this value to run and finalize alter-related tasks (e.g., submitting `AlterReplicaTask` via handleFinishAlterTask). This value bounds concurrent execution of alter operations; raising it increases parallelism and resource usage, lowering it limits concurrent alters and may become a bottleneck. The executor is created together with `alter_max_worker_queue_size`, and the handler scheduling uses `alter_scheduler_interval_millisecond`.
 - Introduced in: v3.2.0
 
+##### `arrow_flight_ssl_enabled`
+
+- Default: false
+- Type: Boolean
+- Unit: -
+- Is mutable: No
+- Description: Whether to enable TLS for the Arrow Flight SQL server. When set to `true`, the server loads its TLS certificate from one of two sources (in priority order): **(1) PEM files** — if `arrow_flight_ssl_cert_file` and `arrow_flight_ssl_key_file` are both set, those files are used directly; **(2) JKS keystore** — otherwise, `ssl_keystore_location`, `ssl_keystore_password`, and `ssl_key_password` are used and the certificate is converted to PEM format in memory. `arrow_flight_port` must also be set to a positive value. Clients must connect using `grpcs://` when TLS is enabled. Requires restart.
+- Introduced in: v4.1.0
+
+##### `arrow_flight_ssl_cert_file`
+
+- Default: ""
+- Type: String
+- Unit: -
+- Is mutable: No
+- Description: Path to a PEM-format certificate chain file for Arrow Flight SQL TLS. When set together with `arrow_flight_ssl_key_file`, these PEM files are used directly for TLS and take precedence over the JKS keystore (`ssl_keystore_location`). Requires `arrow_flight_ssl_enabled = true`. Requires restart.
+- Introduced in: v4.1.0
+
+##### `arrow_flight_ssl_key_file`
+
+- Default: ""
+- Type: String
+- Unit: -
+- Is mutable: No
+- Description: Path to a PEM-format private key file for Arrow Flight SQL TLS. Must be set when `arrow_flight_ssl_cert_file` is configured. Requires `arrow_flight_ssl_enabled = true`. Requires restart.
+- Introduced in: v4.1.0
+
 ##### `automated_cluster_snapshot_interval_seconds`
 
 - Default: 600

@@ -3974,6 +3974,15 @@ public class Config extends ConfigBase {
     @ConfField(mutable = true)
     public static long arrow_flight_sql_connection_query_wait_timeout_ms = 10_000;
 
+    @ConfField
+    public static boolean arrow_flight_ssl_enabled = false;
+
+    @ConfField
+    public static String arrow_flight_ssl_cert_file = "";
+
+    @ConfField
+    public static String arrow_flight_ssl_key_file = "";
+
     @ConfField(mutable = false)
     public static int query_deploy_threadpool_size = max(50, getRuntime().availableProcessors() * 10);
 

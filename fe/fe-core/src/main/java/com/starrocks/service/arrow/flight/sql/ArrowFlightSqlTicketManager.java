@@ -67,15 +67,17 @@ public class ArrowFlightSqlTicketManager {
         private final String fragmentInstanceId;
         private final String host;
         private final int port;
+        private final boolean useTls;
 
         private ParsedTicket(TicketType type, String token, String queryId,
-                             String fragmentInstanceId, String host, int port) {
+                             String fragmentInstanceId, String host, int port, boolean useTls) {
             this.type = type;
             this.token = token;
             this.queryId = queryId;
             this.fragmentInstanceId = fragmentInstanceId;
             this.host = host;
             this.port = port;
+            this.useTls = useTls;
         }
 
         public TicketType getType() {
@@ -102,16 +104,20 @@ public class ArrowFlightSqlTicketManager {
             return port;
         }
 
-        static ParsedTicket feLocal(String token, String queryId) {
-            return new ParsedTicket(TicketType.FE_LOCAL, token, queryId, null, null, 0);
+        public boolean isUseTls() {
+            return useTls;
         }
 
-        static ParsedTicket feProxy(String token, String queryId, String host, int port) {
-            return new ParsedTicket(TicketType.FE_PROXY, token, queryId, null, host, port);
+        static ParsedTicket feLocal(String token, String queryId) {
+            return new ParsedTicket(TicketType.FE_LOCAL, token, queryId, null, null, 0, false);
+        }
+
+        static ParsedTicket feProxy(String token, String queryId, String host, int port, boolean useTls) {
+            return new ParsedTicket(TicketType.FE_PROXY, token, queryId, null, host, port, useTls);
         }
 
         static ParsedTicket beProxy(String queryId, String fragmentInstanceId, String host, int port) {
-            return new ParsedTicket(TicketType.BE_PROXY, null, queryId, fragmentInstanceId, host, port);
+            return new ParsedTicket(TicketType.BE_PROXY, null, queryId, fragmentInstanceId, host, port, false);
         }
     }
 
@@ -150,15 +156,31 @@ public class ArrowFlightSqlTicketManager {
     }
 
     /**
-     * Parses FE proxy ticket format: token|queryId|feHost:fePort
+     * Parses FE proxy ticket format: token|queryId|[scheme://]feHost:fePort
      * ticketParts[0] = token
      * ticketParts[1] = queryId
-     * ticketParts[2] = feHost:fePort (or [ipv6]:fePort)
+     * ticketParts[2] = feHost:fePort, grpc://feHost:fePort, or grpcs://feHost:fePort
+     *
+     * The optional scheme prefix indicates whether the originating FE uses TLS. Tickets
+     * created by TLS-enabled FEs include "grpcs://"; those without TLS use "grpc://".
+     * Legacy tickets (no scheme prefix) are treated as non-TLS for backward compatibility.
      */
     private ParsedTicket parseFEProxyTicket(String[] ticketParts) {
+        String feAddress = ticketParts[2];
+
+        boolean useTls = feAddress.startsWith(GRPCS_SCHEME);
+
+        // Strip scheme prefix if present
+        String hostPortStr = feAddress;
+        if (feAddress.startsWith(GRPCS_SCHEME)) {
+            hostPortStr = feAddress.substring(GRPCS_SCHEME.length());
+        } else if (feAddress.startsWith(GRPC_SCHEME)) {
+            hostPortStr = feAddress.substring(GRPC_SCHEME.length());
+        }
+
         String[] hostPort;
         try {
-            hostPort = NetUtils.resolveHostInfoFromHostPort(ticketParts[2]);
+            hostPort = NetUtils.resolveHostInfoFromHostPort(hostPortStr);
         } catch (AnalysisException e) { // deprecated, but NetUtils uses
             throw CallStatus.INVALID_ARGUMENT.withDescription(
                     "Invalid FE host:port format: " + ticketParts[2]).toRuntimeException();
@@ -172,7 +194,7 @@ public class ArrowFlightSqlTicketManager {
                     "Invalid FE port: " + hostPort[1]).toRuntimeException();
         }
 
-        return ParsedTicket.feProxy(ticketParts[0], ticketParts[1], hostPort[0], port);
+        return ParsedTicket.feProxy(ticketParts[0], ticketParts[1], hostPort[0], port, useTls);
     }
 
     /**
@@ -233,7 +255,11 @@ public class ArrowFlightSqlTicketManager {
         String uuid = extractUuidFromToken(token);
         String feHost = feEndpoint.getUri().getHost();
         int fePort = feEndpoint.getUri().getPort();
-        String hostPort = NetUtils.getHostPortInAccessibleFormat(feHost, fePort);
+        // Embed grpcs:// only when TLS is enabled for backwards compatibility
+        boolean isTls = feEndpoint.getUri().getScheme().contains("tls");
+        String hostPort = isTls
+                ? GRPCS_SCHEME + NetUtils.getHostPortInAccessibleFormat(feHost, fePort)
+                : NetUtils.getHostPortInAccessibleFormat(feHost, fePort);
         return ByteString.copyFromUtf8(uuid + FE_TICKET_DELIMITER + DebugUtil.printId(queryId) + FE_TICKET_DELIMITER + hostPort);
     }
 
