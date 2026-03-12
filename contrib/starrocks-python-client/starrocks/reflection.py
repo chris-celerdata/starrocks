@@ -68,39 +68,45 @@ class StarRocksInspector(Inspector):
     def __init__(self, bind):
         super().__init__(bind)
 
-    def get_view(self, view_name: str, schema: Optional[str] = None, **kwargs: Any) -> ReflectedViewState:
+    def get_view(self, view_name: str, schema: Optional[str] = None,
+                 catalog: Optional[str] = None, **kwargs: Any) -> ReflectedViewState:
         """
         Retrieves information about a specific view.
 
         :param view_name: The name of the view to inspect.
         :param schema: The schema of the view; defaults to the default schema name if None.
+        :param catalog: The catalog of the view; defaults to the connection catalog if None.
         :param kwargs: Additional arguments passed to the dialect's get_view method.
         :return: A ReflectedViewState object.
         :raises: NoSuchTableError if the view does not exist.
         """
-        return self.dialect.get_view(self.bind, view_name, schema=schema, **kwargs)
+        return self.dialect.get_view(self.bind, view_name, schema=schema, catalog=catalog, **kwargs)
 
-    def get_materialized_view(self, view_name: str, schema: Optional[str] = None, **kwargs: Any) -> Optional[ReflectedMVState]:
+    def get_materialized_view(self, view_name: str, schema: Optional[str] = None,
+                               catalog: Optional[str] = None, **kwargs: Any) -> Optional[ReflectedMVState]:
         """
         Retrieves information about a specific materialized view.
 
         :param view_name: The name of the materialized view to inspect.
         :param schema: The schema of the materialized view; defaults to the default schema name if None.
+        :param catalog: The catalog of the materialized view; defaults to the connection catalog if None.
         :param kwargs: Additional arguments passed to the dialect's get_materialized_view method.
         :return: A ReflectedMVState object, or None if the materialized view does not exist.
         """
-        return self.dialect.get_materialized_view(self.bind, view_name, schema=schema, **kwargs)
+        return self.dialect.get_materialized_view(self.bind, view_name, schema=schema, catalog=catalog, **kwargs)
 
-    def get_materialized_view_definition(self, view_name: str, schema: Optional[str] = None, **kwargs: Any) -> Optional[str]:
+    def get_materialized_view_definition(self, view_name: str, schema: Optional[str] = None,
+                                          catalog: Optional[str] = None, **kwargs: Any) -> Optional[str]:
         """
         Retrieves the definition of a specific materialized view.
 
         :param view_name: The name of the materialized view to inspect.
         :param schema: The schema of the materialized view; defaults to the default schema name if None.
+        :param catalog: The catalog of the materialized view; defaults to the connection catalog if None.
         :param kwargs: Additional arguments passed to the dialect's get_materialized_view_definition method.
         :return: The materialized view definition as a string, or None if the view does not exist.
         """
-        mv_state = self.get_materialized_view(view_name, schema=schema, **kwargs)
+        mv_state = self.get_materialized_view(view_name, schema=schema, catalog=catalog, **kwargs)
         return mv_state.definition if mv_state else None
 
     def reflect_table(

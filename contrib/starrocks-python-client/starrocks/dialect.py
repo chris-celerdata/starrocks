@@ -1388,12 +1388,14 @@ class StarRocksDialect(MySQLDialect_pymysql):
         return _reflection.StarRocksTableDefinitionParser(self, preparer)
 
     def _read_from_information_schema(
-        self, connection: Connection, inf_sch_table: str, charset: Optional[str] = None, **kwargs: Any
+        self, connection: Connection, inf_sch_table: str, charset: Optional[str] = None,
+        catalog: Optional[str] = None, **kwargs: Any
     ) -> List[_DecodingRow]:
+        prefix = self.identifier_preparer.quote_identifier(catalog) + "." if catalog else ""
         st = text(dedent(
             f"""
             SELECT *
-            FROM information_schema.{inf_sch_table}
+            FROM {prefix}information_schema.{inf_sch_table}
             WHERE {" AND ".join([f"{k} = :{k}" for k in kwargs.keys()])}
         """
         )).bindparams(
@@ -1423,6 +1425,14 @@ class StarRocksDialect(MySQLDialect_pymysql):
             else:
                 raise
 
+    def _parsed_state_or_create(self, connection, table_name, schema=None, **kw):
+        """Override to thread `catalog` kwarg through to _setup_parser."""
+        return self._setup_parser(
+            connection, table_name, schema,
+            info_cache=kw.get("info_cache", None),
+            catalog=kw.get("catalog", None),
+        )
+
     @reflection.cache
     def _setup_parser(
         self, connection, table_name, schema = None, **kwargs
@@ -1433,8 +1443,9 @@ class StarRocksDialect(MySQLDialect_pymysql):
         Key: Query table_kind only once here, leveraging @reflection.cache.
         """
         # logger.debug("setup parser for table object: %s, schema: %s", table_name, schema)
+        catalog = kwargs.get("catalog", None)
         # 1. Query object type (only once)
-        table_kind = self._get_table_kind_from_db(connection, table_name, schema)
+        table_kind = self._get_table_kind_from_db(connection, table_name, schema, catalog=catalog)
 
         # 2. Dispatch based on type
         if table_kind == TableKind.VIEW:
@@ -1444,7 +1455,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
         else:
             return self._setup_table_parser(connection, table_name, schema, **kwargs)
 
-    def _get_table_kind_from_db(self, connection: Connection, table_name: str, schema: Optional[str]) -> str:
+    def _get_table_kind_from_db(self, connection: Connection, table_name: str, schema: Optional[str],
+                                catalog: Optional[str] = None) -> str:
         """
         Query object type from the database (without cache).
         Only called once in _setup_parser.
@@ -1453,7 +1465,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             schema = connection.dialect.default_schema_name
         # 1. Query information_schema.tables
         table_rows = self._read_from_information_schema(
-            connection, "tables", table_schema=schema, table_name=table_name
+            connection, "tables", catalog=catalog, table_schema=schema, table_name=table_name
         )
         if not table_rows:
             raise exc.NoSuchTableError(table_name)
@@ -1467,7 +1479,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
         # 3. VIEW → Further Distinguish
         if table_type == 'VIEW':
             mv_rows = self._read_from_information_schema(
-                connection, "materialized_views",
+                connection, "materialized_views", catalog=catalog,
                 table_schema=schema, table_name=table_name
             )
             return TableKind.MATERIALIZED_VIEW if mv_rows else TableKind.VIEW
@@ -1490,6 +1502,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
     ):
         charset: Optional[str] = self._connection_charset
         parser: _reflection.StarRocksTableDefinitionParser = self._tabledef_parser
+        catalog: Optional[str] = kwargs.get("catalog", None)
         # logger.debug("setup table parser for table: %s, schema: %s", table_name, schema)
 
         if not schema:
@@ -1499,6 +1512,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             connection=connection,
             inf_sch_table="tables",
             charset=charset,
+            catalog=catalog,
             table_schema=schema,
             table_name=table_name,
         )
@@ -1514,6 +1528,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
                 connection=connection,
                 inf_sch_table="tables_config",
                 charset=charset,
+                catalog=catalog,
                 table_schema=schema,
                 table_name=table_name,
             )
@@ -1538,17 +1553,18 @@ class StarRocksDialect(MySQLDialect_pymysql):
             connection=connection,
             inf_sch_table="columns",
             charset=charset,
+            catalog=catalog,
             table_schema=schema,
             table_name=table_name,
         )
 
-        full_name = self._get_quote_full_table_name(table_name, schema=schema)
+        full_name = self._get_quote_full_table_name(table_name, schema=schema, catalog=catalog)
         show_create_table = self._show_create_table(connection, None, charset, full_name)
         column_autoinc = self._get_autoinc_from_show_create_table(show_create_table)
 
         # Get aggregate info from `SHOW FULL COLUMNS`
         full_column_rows: List[Row] = self._get_show_full_columns(
-            connection, table_name=table_name, schema=schema
+            connection, table_name=table_name, schema=schema, catalog=catalog
         )
         column_2_agg_type: Dict[str, str] = {
             row.Field: row.Extra.upper()
@@ -1573,11 +1589,11 @@ class StarRocksDialect(MySQLDialect_pymysql):
         )
 
     def _get_quote_full_table_name(
-        self, table_name: str, schema: Optional[str] = None
+        self, table_name: str, schema: Optional[str] = None, catalog: Optional[str] = None
     ) -> str:
         return ".".join(
             self.identifier_preparer._quote_free_identifiers(
-                schema, table_name
+                catalog, schema, table_name
             )
         )
 
@@ -1619,13 +1635,14 @@ class StarRocksDialect(MySQLDialect_pymysql):
         return None
 
     def _get_show_full_columns(
-        self, connection: Connection, table_name: str, schema: Optional[str] = None, **kwargs: Any
+        self, connection: Connection, table_name: str, schema: Optional[str] = None,
+        catalog: Optional[str] = None, **kwargs: Any
     ) -> List[Row]:
         """Run SHOW FULL COLUMNS to get detailed column information.
         Currently, it's only used to get aggregate type of columns.
         Other column info are still mainly extracted from information_schema.columns.
         """
-        full_table_name = self._get_quote_full_table_name(table_name, schema)
+        full_table_name = self._get_quote_full_table_name(table_name, schema, catalog=catalog)
         try:
             st: str = "SHOW FULL COLUMNS FROM %s" % full_table_name
             # logger.debug(f"query special column info by using: {st}")
@@ -1759,7 +1776,8 @@ class StarRocksDialect(MySQLDialect_pymysql):
                 return False
             raise
 
-    def get_view_names(self, connection: Connection, schema: Optional[str] = None, **kwargs: Any) -> List[str]:
+    def get_view_names(self, connection: Connection, schema: Optional[str] = None,
+                       catalog: Optional[str] = None, **kwargs: Any) -> List[str]:
         """Return all view names in a given schema."""
         if schema is None:
             schema = self.default_schema_name
@@ -1767,6 +1785,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             rows = self._read_from_information_schema(
                 connection,
                 "views",
+                catalog=catalog,
                 table_schema=schema,
             )
             return [row.TABLE_NAME for row in rows]
@@ -1780,11 +1799,12 @@ class StarRocksDialect(MySQLDialect_pymysql):
         """
         Fetches raw data for a view and passes it to the parser.
         """
+        catalog: Optional[str] = kwargs.get("catalog", None)
         if schema is None:
             schema = self.default_schema_name
 
         view_rows = self._read_from_information_schema(
-            connection, "views", table_schema=schema, table_name=view_name
+            connection, "views", catalog=catalog, table_schema=schema, table_name=view_name
         )
         if not view_rows:
             raise exc.NoSuchTableError(view_name)
@@ -1793,7 +1813,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
         table_row = None
         try:
             table_rows = self._read_from_information_schema(
-                connection, "tables", table_schema=schema, table_name=view_name
+                connection, "tables", catalog=catalog, table_schema=schema, table_name=view_name
             )
             if table_rows:
                 table_row = table_rows[0]
@@ -1804,6 +1824,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
         column_rows: List[_DecodingRow] = self._read_from_information_schema(
             connection=connection,
             inf_sch_table="columns",
+            catalog=catalog,
             table_schema=schema,
             table_name=view_name,
         )
@@ -1813,7 +1834,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
         create_view_sql = None
         try:
             # Execute SHOW CREATE VIEW to get the full CREATE VIEW statement
-            qualified_name = f"`{schema}`.`{view_name}`" if schema else f"`{view_name}`"
+            qualified_name = self._get_quote_full_table_name(view_name, schema=schema, catalog=catalog)
             result = connection.execute(text(f"SHOW CREATE VIEW {qualified_name}"))
             rows = result.fetchone()
             if rows:
@@ -1825,15 +1846,15 @@ class StarRocksDialect(MySQLDialect_pymysql):
         parser = self._tabledef_parser
         return parser.parse_view(view_row, table_row, column_rows, create_view_sql)
 
-    def get_view(self, connection: Connection, view_name: str, schema: Optional[str] = None, **kwargs: Any
-    ) -> ReflectedViewState:
+    def get_view(self, connection: Connection, view_name: str, schema: Optional[str] = None,
+                 catalog: Optional[str] = None, **kwargs: Any) -> ReflectedViewState:
         """
         Return a ReflectedViewState object for a single view.
         Pass kwargs with `info_cache=inspector.info_cache` if you want to use the cache.
 
         Raises NoSuchTableError if the view does not exist.
         """
-        view_info = self._setup_view_parser(connection, view_name, schema=schema, **kwargs)
+        view_info = self._setup_view_parser(connection, view_name, schema=schema, catalog=catalog, **kwargs)
         logger.debug(
             "get_view normalized: schema=%s, name=%s, security=%s, definition=(%s)",
             schema, view_info.name, view_info.security, view_info.definition
@@ -1841,16 +1862,18 @@ class StarRocksDialect(MySQLDialect_pymysql):
         return ReflectionViewDefaults.apply_info(view_info)
 
     def get_view_definition(
-        self, connection: Connection, view_name: str, schema: Optional[str] = None, **kwargs: Any
+        self, connection: Connection, view_name: str, schema: Optional[str] = None,
+        catalog: Optional[str] = None, **kwargs: Any
     ) -> Optional[str]:
         """Return the definition of a view.
         Pass kwargs with `info_cache=inspector.info_cache` if you want to use the cache.
         """
-        view_state = self._setup_view_parser(connection, view_name, schema=schema, **kwargs)
+        view_state = self._setup_view_parser(connection, view_name, schema=schema, catalog=catalog, **kwargs)
         return view_state.definition if view_state else None
 
     def get_materialized_view_names(
-        self, connection: Connection, schema: Optional[str] = None, **kwargs: Any
+        self, connection: Connection, schema: Optional[str] = None,
+        catalog: Optional[str] = None, **kwargs: Any
     ) -> List[str]:
         """Return all materialized view names in a given schema."""
         if schema is None:
@@ -1859,6 +1882,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             rows: List[_DecodingRow] = self._read_from_information_schema(
                 connection,
                 "materialized_views",
+                catalog=catalog,
                 table_schema=schema,
             )
             return [row.TABLE_NAME for row in rows]
@@ -1872,13 +1896,14 @@ class StarRocksDialect(MySQLDialect_pymysql):
         """
         Fetches all raw data for a Materialized View and passes it to the parser.
         """
+        catalog: Optional[str] = kwargs.get("catalog", None)
         if schema is None:
             schema = self.default_schema_name
 
         try:
             # 1. Get MV row (contains DDL) from information_schema.materialized_views
             mv_rows = self._read_from_information_schema(
-                connection, "materialized_views", table_schema=schema, table_name=view_name
+                connection, "materialized_views", catalog=catalog, table_schema=schema, table_name=view_name
             )
             if not mv_rows:
                 raise exc.NoSuchTableError(view_name)
@@ -1888,7 +1913,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             table_row = None
             try:
                 table_rows = self._read_from_information_schema(
-                    connection, "tables", table_schema=schema, table_name=view_name
+                    connection, "tables", catalog=catalog, table_schema=schema, table_name=view_name
                 )
                 if table_rows:
                     table_row = table_rows[0]
@@ -1899,7 +1924,7 @@ class StarRocksDialect(MySQLDialect_pymysql):
             config_row = None
             try:
                 config_rows = self._read_from_information_schema(
-                    connection, "tables_config", table_schema=schema, table_name=view_name
+                    connection, "tables_config", catalog=catalog, table_schema=schema, table_name=view_name
                 )
                 if config_rows:
                     config_row = config_rows[0]
@@ -1915,23 +1940,25 @@ class StarRocksDialect(MySQLDialect_pymysql):
             raise
 
     def get_materialized_view(
-        self, connection: Connection, view_name: str, schema: Optional[str] = None, **kwargs: Any
+        self, connection: Connection, view_name: str, schema: Optional[str] = None,
+        catalog: Optional[str] = None, **kwargs: Any
     ) -> ReflectedMVState:
         """Return all information about a materialized view.
         Pass kwargs with `info_cache=inspector.info_cache` if you want to use the cache.
         """
-        mv_info = self._setup_mv_parser(connection, view_name, schema=schema, **kwargs)
+        mv_info = self._setup_mv_parser(connection, view_name, schema=schema, catalog=catalog, **kwargs)
         logger.debug("get_materialized_view normalized: schema=%s, name=%s, definition=(%s)",
                      schema, view_name, mv_info.definition)
         return ReflectionMVDefaults.apply_info(mv_info)
 
     def get_materialized_view_options(
-        self, connection: Connection, view_name: str, schema: Optional[str] = None, **kwargs: Any
+        self, connection: Connection, view_name: str, schema: Optional[str] = None,
+        catalog: Optional[str] = None, **kwargs: Any
     ) -> Dict[str, str]:
         """Return the physical properties of a materialized view.
         Pass kwargs with `info_cache=inspector.info_cache` if you want to use the cache.
         """
-        mv_info = self._setup_mv_parser(connection, view_name, schema=schema, **kwargs)
+        mv_info = self._setup_mv_parser(connection, view_name, schema=schema, catalog=catalog, **kwargs)
         return mv_info.table_options
 
 
