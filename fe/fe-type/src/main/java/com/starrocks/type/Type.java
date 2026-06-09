@@ -656,6 +656,28 @@ public abstract class Type implements Cloneable {
         }
     }
 
+    /**
+     * JDBC data type description
+     * Returns the fractional-seconds precision for datetime/time types, or null if not applicable.
+     * This populates information_schema.columns.DATETIME_PRECISION, from which MySQL-protocol
+     * clients (e.g. the MySQL JDBC driver used by Trino) derive the JDBC column size for temporal
+     * types. Returning null leaves the size unresolvable and makes such clients fail with
+     * "column size not present". StarRocks DATETIME is not parameterized but stores up to
+     * microsecond precision (since v3.3.5), so it reports 6.
+     */
+    public Integer getDatetimePrecision() {
+        if (!isScalarType()) {
+            return null;
+        }
+        ScalarType t = (ScalarType) this;
+        switch (t.getPrimitiveType()) {
+            case DATETIME:
+                return 6;
+            default:
+                return null;
+        }
+    }
+
     public int getIndexSize() {
         if (this.getPrimitiveType() == PrimitiveType.CHAR) {
             return ((ScalarType) this).getLength();

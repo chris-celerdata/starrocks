@@ -269,6 +269,20 @@ public class TypeTest {
     }
 
     @Test
+    public void testGetDatetimePrecision() {
+        // DATETIME stores up to microsecond precision, so it reports 6. This populates
+        // information_schema.columns.DATETIME_PRECISION, which the MySQL JDBC driver uses to
+        // derive the JDBC column size for temporal types; a null there makes clients such as
+        // Trino fail with "column size not present".
+        Assertions.assertEquals(Integer.valueOf(6), DateType.DATETIME.getDatetimePrecision());
+        // Non-temporal and date-only types have no fractional-seconds precision.
+        Assertions.assertNull(DateType.DATE.getDatetimePrecision());
+        Assertions.assertNull(IntegerType.INT.getDatetimePrecision());
+        Assertions.assertNull(TypeFactory.createVarcharType(50).getDatetimePrecision());
+        Assertions.assertNull(new ArrayType(IntegerType.INT).getDatetimePrecision());
+    }
+
+    @Test
     public void testMapSerialAndDeser() {
         // map<int,struct<c1:int,cc1:string>>
         StructType c1 = new StructType(Lists.newArrayList(

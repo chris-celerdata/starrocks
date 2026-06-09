@@ -389,7 +389,12 @@ Status SchemaColumnsScanner::fill_chunk(ChunkPtr* chunk) {
             // DATETIME_PRECISION
             {
                 auto* column = (*chunk)->get_column_raw_ptr_by_slot_id(13);
-                fill_data_column_with_null(column);
+                if (_desc_result.columns[_column_index].columnDesc.__isset.columnDatetimePrecision) {
+                    int64_t value = _desc_result.columns[_column_index].columnDesc.columnDatetimePrecision;
+                    fill_column_with_slot<TYPE_BIGINT>(column, (void*)&value);
+                } else {
+                    fill_data_column_with_null(column);
+                }
             }
             break;
         }

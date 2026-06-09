@@ -98,6 +98,9 @@ struct TColumnDesc {
   26: optional string columnTypeStr
   27: optional string dataType
   28: optional string generatedColumnExprStr
+  // Fractional-seconds precision for temporal types, exposed as
+  // information_schema.columns.DATETIME_PRECISION.
+  29: optional i32 columnDatetimePrecision
 }
 
 // A column definition; used by CREATE TABLE and DESCRIBE <table> statements. A column

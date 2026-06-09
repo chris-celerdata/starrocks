@@ -1001,6 +1001,10 @@ public class FrontendServiceImpl implements FrontendService.Iface {
             if (decimalDigits != null) {
                 desc.setColumnScale(decimalDigits);
             }
+            final Integer datetimePrecision = column.getType().getDatetimePrecision();
+            if (datetimePrecision != null) {
+                desc.setColumnDatetimePrecision(datetimePrecision);
+            }
             desc.setAllowNull(column.isAllowNull());
             if (column.isKey()) {
                 // COLUMN_KEY (UNI, AGG, DUP, PRI)
