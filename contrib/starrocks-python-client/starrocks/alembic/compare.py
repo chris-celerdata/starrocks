@@ -566,8 +566,11 @@ def _get_canonical_sql_via_temp_view(conn, schema: str, sql: str) -> Optional[st
     finally:
         try:
             conn.exec_driver_sql(f"DROP VIEW IF EXISTS {quoted}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "Failed to drop temp canonicalization view %s; it may need to be dropped manually: %s",
+                quoted, e,
+            )
 
 
 def _compare_view_definition_and_columns(
