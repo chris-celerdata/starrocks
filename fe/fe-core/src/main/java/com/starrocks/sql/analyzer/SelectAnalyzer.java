@@ -582,8 +582,6 @@ public class SelectAnalyzer {
         return groupByExpressions;
     }
 
-<<<<<<< HEAD
-=======
     /**
      * ROLLUP/CUBE/GROUPING SETS produce super-aggregate rows where grouping-key columns are NULL,
      * regardless of whether the underlying column is declared NOT NULL. The Repeat operator already
@@ -620,22 +618,6 @@ public class SelectAnalyzer {
         }
     }
 
-    private void addGroupByAllExpression(Expr expression, List<Expr> groupByExpressions,
-                                         AnalyzeState analyzeState, Scope sourceScope) {
-        if (groupByExpressions.contains(expression)) {
-            return;
-        }
-        analyzeExpression(expression, analyzeState, sourceScope);
-        if (!expression.getType().canGroupBy()) {
-            throw new SemanticException(Type.NOT_SUPPORT_GROUP_BY_ERROR_MSG);
-        }
-        AnalyzerUtils.verifyNoAggregateFunctions(expression, "GROUP BY");
-        AnalyzerUtils.verifyNoWindowFunctions(expression, "GROUP BY");
-        AnalyzerUtils.verifyNoGroupingFunctions(expression, "GROUP BY");
-        groupByExpressions.add(expression);
-    }
-
->>>>>>> 0829123d37 ([BugFix] Fix analysis time nullability for ROLLUP keys (#76149))
     private List<Expr> rewriteGroupByAlias(List<Expr> groupingExprs, AnalyzeState analyzeState, Scope sourceScope,
                                            Scope outputScope, List<Expr> outputExpressions) {
         return groupingExprs.stream().map(e -> {
