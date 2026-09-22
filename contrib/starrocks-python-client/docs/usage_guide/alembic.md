@@ -588,7 +588,7 @@ With the rewriter enabled, autogenerate emits a single combined operation for ea
 ```python
 # inside versions/<revision_id>_...py
 def upgrade():
-    op.starrocks_alter_columns(
+    op.alter_table_columns(
         'my_table',
         adds=[sa.Column('a', INTEGER(), nullable=True),
               sa.Column('b', VARCHAR(50), nullable=True)],
@@ -596,7 +596,7 @@ def upgrade():
     )
 
 def downgrade():
-    op.starrocks_alter_columns(
+    op.alter_table_columns(
         'my_table',
         adds=[sa.Column('c', INTEGER(), nullable=True)],
         drops=[sa.Column('a'), sa.Column('b')],
@@ -607,7 +607,7 @@ def downgrade():
 
 - Only `ADD COLUMN` and `DROP COLUMN` are coalesced. `MODIFY COLUMN` (type/nullability changes) and property/distribution changes remain separate statements. If a table has both a combined add/drop *and* a modify in the same revision, they are still two schema-change jobs — enable the wait option below, or split them into separate revisions.
 - The combined operation compiles to a single `ALTER TABLE`, so its column ordering within one statement does not matter to StarRocks.
-- Already-generated migration scripts are not rewritten retroactively; the rewriter only affects new `--autogenerate` runs. You can also call `op.starrocks_alter_columns(...)` by hand.
+- Already-generated migration scripts are not rewritten retroactively; the rewriter only affects new `--autogenerate` runs. You can also call `op.alter_table_columns(...)` by hand.
 
 #### Waiting for schema changes to reach a terminal state (opt-in)
 
