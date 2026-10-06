@@ -169,34 +169,170 @@ class TestRenderAlterTableColumns:
         assert "schema='mydb'" in rendered
 
 
-class TestRangeSortKeyCoalescing:
-    """Pin the SQL shape the FE rejects on shared-data RANGE-distributed tables.
+class _FakeResult:
+    """Minimal stand-in for a SQLAlchemy Result over one reflected row."""
 
-    ``SchemaChangeHandler`` routes an ADD of a key column or a DROP of a
-    sort-key column on such a table to a dedicated rewrite job and throws
+    def __init__(self, row):
+        self._row = row
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self._row
+
+    def scalar(self):
+        return self._row
+
+
+class _FakeConnection:
+    """Answers the rewriter's tables_config lookup with a canned row."""
+
+    def __init__(self, row):
+        self._row = row
+        self.queries = []
+
+    def execute(self, statement, params=None):
+        sql = str(statement)
+        self.queries.append(sql)
+        if "SELECT DATABASE()" in sql:
+            return _FakeResult("mydb")
+        return _FakeResult(self._row)
+
+
+class _FakeContext:
+    def __init__(self, row):
+        self.connection = _FakeConnection(row) if row is not None else None
+
+
+def _range_context(sort_key="`k1`, `k2`", table_model="DUP_KEYS"):
+    return _FakeContext({
+        "DISTRIBUTE_TYPE": "RANGE",
+        "SORT_KEY": sort_key,
+        "TABLE_MODEL": table_model,
+    })
+
+
+def _hash_context():
+    return _FakeContext({
+        "DISTRIBUTE_TYPE": "HASH",
+        "SORT_KEY": "`k1`",
+        "TABLE_MODEL": "DUP_KEYS",
+    })
+
+
+class TestRangeSortKeyCoalescing:
+    """Range sort-key changes must not share an ALTER TABLE.
+
+    On a shared-data RANGE-distributed table the FE routes an ADD of a key
+    column or a DROP of a sort-key column to a dedicated rewrite job and throws
     "... can not be combined with other alter operations" when the statement
-    carries more than one clause. These tests record that the rewriter is
-    currently distribution-blind, so it emits exactly that shape; the live
-    behaviour is covered by
-    ``test/integration/test_combine_column_alters_range_key.py``.
+    carries more than one clause (``SchemaChangeHandler``). The live behaviour
+    is covered by ``test/integration/test_combine_column_alters_range_key.py``.
     """
 
-    def test_sort_key_drop_is_coalesced_with_another_change(self):
-        # k2 would be part of the sort key of a DUPLICATE KEY(k1, k2) table.
+    def test_sort_key_drop_stays_standalone(self):
+        # k2 is part of the sort key of a DUPLICATE KEY(k1, k2) table.
+        mto = ops.ModifyTableOps("t_range", ops=[
+            ops.DropColumnOp("t_range", "k2"),
+            ops.AddColumnOp("t_range", Column("v2", INTEGER)),
+            ops.AddColumnOp("t_range", Column("v3", INTEGER)),
+        ], schema="mydb")
+
+        res = _combine_column_alters(_range_context(), None, mto)
+
+        assert [type(o).__name__ for o in res.ops] == ["DropColumnOp", "AlterTableColumnsOp"]
+        assert res.ops[0].column_name == "k2"
+        combined = res.ops[1]
+        assert [c.name for c in combined.adds] == ["v2", "v3"]
+        assert combined.drops == []
+
+    def test_key_column_add_stays_standalone(self):
+        key_col = Column("k3", INTEGER, starrocks_is_agg_key=True)
+        mto = ops.ModifyTableOps("t_range", ops=[
+            ops.AddColumnOp("t_range", key_col),
+            ops.AddColumnOp("t_range", Column("v2", INTEGER)),
+            ops.DropColumnOp("t_range", "v1"),
+        ], schema="mydb")
+
+        res = _combine_column_alters(_range_context(), None, mto)
+
+        assert [type(o).__name__ for o in res.ops] == ["AddColumnOp", "AlterTableColumnsOp"]
+        assert res.ops[0].column.name == "k3"
+        combined = res.ops[1]
+        assert [c.name for c in combined.adds] == ["v2"]
+        assert [c.name for c in combined.drops] == ["v1"]
+
+    def test_implicit_key_add_on_aggregate_table_stays_standalone(self):
+        # On an AGG_KEYS table a column with no agg_type is implicitly a key.
+        mto = ops.ModifyTableOps("t_range", ops=[
+            ops.AddColumnOp("t_range", Column("k3", INTEGER)),
+            ops.AddColumnOp("t_range", Column("v2", INTEGER, starrocks_agg_type="SUM")),
+            ops.DropColumnOp("t_range", "v1"),
+        ], schema="mydb")
+
+        res = _combine_column_alters(_range_context(table_model="AGG_KEYS"), None, mto)
+
+        assert [type(o).__name__ for o in res.ops] == ["AddColumnOp", "AlterTableColumnsOp"]
+        assert res.ops[0].column.name == "k3"
+        assert [c.name for c in res.ops[1].adds] == ["v2"]
+
+    def test_non_key_changes_on_a_range_table_still_coalesce(self):
+        mto = ops.ModifyTableOps("t_range", ops=[
+            ops.AddColumnOp("t_range", Column("v2", INTEGER)),
+            ops.DropColumnOp("t_range", "v1"),
+        ], schema="mydb")
+
+        res = _combine_column_alters(_range_context(), None, mto)
+
+        assert len(res.ops) == 1
+        assert isinstance(res.ops[0], AlterTableColumnsOp)
+
+    def test_only_one_remaining_change_is_left_uncombined(self):
         mto = ops.ModifyTableOps("t_range", ops=[
             ops.DropColumnOp("t_range", "k2"),
             ops.AddColumnOp("t_range", Column("v2", INTEGER)),
         ], schema="mydb")
 
-        res = _combine_column_alters(None, None, mto)
+        res = _combine_column_alters(_range_context(), None, mto)
+
+        # The drop is excluded, leaving a single add: nothing to combine.
+        assert [type(o).__name__ for o in res.ops] == ["DropColumnOp", "AddColumnOp"]
+
+    def test_hash_table_coalesces_sort_key_changes(self):
+        # The restriction is specific to RANGE distribution.
+        mto = ops.ModifyTableOps("t_hash", ops=[
+            ops.DropColumnOp("t_hash", "k1"),
+            ops.AddColumnOp("t_hash", Column("v2", INTEGER)),
+        ], schema="mydb")
+
+        res = _combine_column_alters(_hash_context(), None, mto)
 
         assert len(res.ops) == 1
-        combined = res.ops[0]
-        assert isinstance(combined, AlterTableColumnsOp)
-        # Both changes land in one statement -- rejected by the FE on a
-        # shared-data RANGE table. A fix must leave the sort-key drop standalone.
-        assert [c.name for c in combined.drops] == ["k2"]
-        assert [c.name for c in combined.adds] == ["v2"]
+        assert isinstance(res.ops[0], AlterTableColumnsOp)
+
+    def test_without_a_connection_behaviour_is_unchanged(self):
+        # Offline autogenerate cannot reflect; coalesce as before.
+        mto = ops.ModifyTableOps("t_range", ops=[
+            ops.DropColumnOp("t_range", "k2"),
+            ops.AddColumnOp("t_range", Column("v2", INTEGER)),
+        ], schema="mydb")
+
+        res = _combine_column_alters(_FakeContext(None), None, mto)
+
+        assert len(res.ops) == 1
+        assert isinstance(res.ops[0], AlterTableColumnsOp)
+
+    def test_schema_falls_back_to_the_current_database(self):
+        mto = ops.ModifyTableOps("t_range", ops=[
+            ops.DropColumnOp("t_range", "k2"),
+            ops.AddColumnOp("t_range", Column("v2", INTEGER)),
+        ])
+        ctx = _range_context()
+
+        _combine_column_alters(ctx, None, mto)
+
+        assert any("SELECT DATABASE()" in q for q in ctx.connection.queries)
 
     def test_coalesced_ddl_renders_as_one_multi_clause_statement(self):
         add_col = Column("v2", INTEGER)
@@ -213,5 +349,3 @@ class TestRangeSortKeyCoalescing:
 
         assert sql.count("ALTER TABLE") == 1
         assert "ADD COLUMN" in sql and "DROP COLUMN" in sql
-        # One ALTER carrying two clauses: the shape the routed range paths refuse.
-        assert sql.index("DROP COLUMN") > sql.index("ALTER TABLE")

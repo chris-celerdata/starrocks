@@ -15,16 +15,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, NamedTuple, Optional, Tuple, Union
 
 from alembic.autogenerate.rewriter import Rewriter
 from alembic.operations import Operations, ops
-from sqlalchemy import Column, MetaData, Table
+from sqlalchemy import Column, MetaData, Table, text
 
+from starrocks.common import utils
 from starrocks.common.params import (
+    ColumnAggInfoKey,
     SRKwargsPrefix,
     TableObjectInfoKey,
 )
+from starrocks.common.types import TableModel
 from starrocks.sql.schema import MaterializedView, View, extract_view_columns
 
 
@@ -1073,6 +1076,76 @@ class AlterTableColumnsOp(ops.AlterTableOp):
 combine_column_alters = Rewriter()
 
 
+class _RangeTableInfo(NamedTuple):
+    """The shape of a RANGE-distributed table, as far as coalescing cares."""
+
+    sort_key: FrozenSet[str]  # lower-cased sort-key column names
+    is_aggregate: bool  # AGG_KEYS table: a column with no agg_type is a key
+
+
+def _reflect_range_table(context: Any, table_name: str,
+                         schema: Optional[str]) -> Optional[_RangeTableInfo]:
+    """Return the table's range-distribution shape, or ``None`` if not RANGE.
+
+    Only shared-data tables with RANGE distribution restrict which column
+    changes may share an ``ALTER TABLE``; everything else coalesces freely. When
+    the table cannot be inspected (offline autogenerate, no such table yet, an
+    older server without these columns) we answer ``None`` and coalesce as
+    before: the restriction applies to a narrow table shape, and a failed
+    reflection must not silently change behaviour for everyone else.
+    """
+    connection = getattr(context, "connection", None)
+    if connection is None:
+        return None
+
+    try:
+        if not schema:
+            schema = connection.execute(text("SELECT DATABASE()")).scalar()
+        row = connection.execute(
+            text("SELECT DISTRIBUTE_TYPE, SORT_KEY, TABLE_MODEL "
+                 "FROM information_schema.tables_config "
+                 "WHERE TABLE_SCHEMA = :schema AND TABLE_NAME = :table_name"),
+            {"schema": schema, "table_name": table_name},
+        ).mappings().first()
+    except Exception as exc:  # pragma: no cover - server/permission dependent
+        logger.debug("Could not inspect distribution of %s.%s: %s", schema, table_name, exc)
+        return None
+
+    if not row or str(row.get("DISTRIBUTE_TYPE") or "").upper() != "RANGE":
+        return None
+
+    sort_key = frozenset(
+        name.strip().strip("`").lower()
+        for name in str(row.get("SORT_KEY") or "").split(",")
+        if name.strip()
+    )
+    table_model = str(row.get("TABLE_MODEL") or "").upper()
+    is_aggregate = table_model in (TableModel.AGG_KEYS, TableModel.AGG_KEYS2)
+    logger.debug("Table %s.%s is RANGE-distributed (sort key: %s)", schema, table_name, sorted(sort_key))
+    return _RangeTableInfo(sort_key=sort_key, is_aggregate=is_aggregate)
+
+
+def _shifts_range_sort_key_on_add(column: Column, range_info: _RangeTableInfo) -> bool:
+    """Whether adding this column changes the table's range sort key.
+
+    Mirrors the FE's ``addTouchesKeyDerivedRangeSortKey``: only a *key* column
+    extends a key-derived sort key. A key column is one marked ``KEY``
+    explicitly, or — on an AGGREGATE KEY table — one carrying no aggregate
+    function. The FE narrows this further to a sort key that still equals the
+    key columns; we do not reflect the key column list, so this stays a
+    superset: at worst a handful of extra adds are emitted standalone.
+    """
+    options = utils.extract_dialect_options_as_case_insensitive(column)
+    if ColumnAggInfoKey.IS_AGG_KEY in options:
+        return True
+    return range_info.is_aggregate and ColumnAggInfoKey.AGG_TYPE not in options
+
+
+def _shifts_range_sort_key_on_drop(column_name: str, range_info: _RangeTableInfo) -> bool:
+    """Whether dropping this column changes the table's range sort key."""
+    return column_name.lower() in range_info.sort_key
+
+
 @combine_column_alters.rewrites(ops.ModifyTableOps)
 def _combine_column_alters(context, revision, op: ops.ModifyTableOps):
     """Coalesce a table's AddColumnOp/DropColumnOp into a single combined op.
@@ -1083,6 +1156,17 @@ def _combine_column_alters(context, revision, op: ops.ModifyTableOps):
     operations keep their relative position. With fewer than two column changes
     there is nothing to combine and the container is returned unchanged.
 
+    One exception: on a shared-data table with RANGE distribution, a change that
+    shifts the range sort key — adding a key column, or dropping a sort-key
+    column — is routed by the FE to a dedicated rewrite job that refuses to run
+    alongside anything else ("... can not be combined with other alter
+    operations", ``SchemaChangeHandler.buildRoutedAddKeyColumnJob`` and the
+    routed drop path). Such a change is therefore left as its own operation, in
+    its original position, and the remaining column changes still coalesce.
+    Emitting those as separate statements needs the schema-change wait
+    (``starrocks_wait_for_schema_change``), since the routed job is a real data
+    rewrite rather than a metadata-only change.
+
     No index-drop reordering hazard: the dialect's ``get_indexes`` does not
     reflect StarRocks bitmap/secondary indexes, so autogenerate never emits a
     ``DropIndexOp`` for them — removing an indexed column yields only a
@@ -1090,6 +1174,8 @@ def _combine_column_alters(context, revision, op: ops.ModifyTableOps):
     reordered relative to a column drop, and StarRocks removes a column's index
     together with the column anyway.
     """
+    range_info = _reflect_range_table(context, op.table_name, op.schema)
+
     adds: List[Column] = []
     drops: List[Column] = []
     new_ops: List[Any] = []
@@ -1097,11 +1183,21 @@ def _combine_column_alters(context, revision, op: ops.ModifyTableOps):
 
     for inner in op.ops:
         if isinstance(inner, ops.AddColumnOp):
+            if range_info is not None and _shifts_range_sort_key_on_add(inner.column, range_info):
+                logger.debug("Keeping ADD COLUMN %s standalone: it shifts the range sort key "
+                             "of %s", inner.column.name, op.table_name)
+                new_ops.append(inner)
+                continue
             adds.append(inner.column)
             if combined_pos == -1:
                 combined_pos = len(new_ops)
                 new_ops.append(None)  # placeholder for the combined op
         elif isinstance(inner, ops.DropColumnOp):
+            if range_info is not None and _shifts_range_sort_key_on_drop(inner.column_name, range_info):
+                logger.debug("Keeping DROP COLUMN %s standalone: it shifts the range sort key "
+                             "of %s", inner.column_name, op.table_name)
+                new_ops.append(inner)
+                continue
             drops.append(inner.to_column())
             if combined_pos == -1:
                 combined_pos = len(new_ops)

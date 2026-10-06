@@ -27,9 +27,11 @@ batch (``SchemaChangeHandler``):
 ``ALTER TABLE``, so such a revision becomes unexecutable even though the same
 changes work as separate statements.
 
-These tests require a shared-data cluster whose default distribution is RANGE;
-they skip on a shared-nothing cluster (where ``needsRangeRewriteSchemaChange``
-returns false immediately and the restriction cannot trigger).
+These tests require a shared-data cluster that can create RANGE-distributed
+tables (the ``enable_range_distribution`` session variable is set before each
+CREATE TABLE); they skip on a shared-nothing cluster (where
+``needsRangeRewriteSchemaChange`` returns false immediately and the restriction
+cannot trigger).
 """
 
 from __future__ import annotations
@@ -54,15 +56,30 @@ logger = logging.getLogger(__name__)
 SCHEMA = "sr_range_key_test"
 
 
+def _enable_range_distribution(conn) -> None:
+    """Opt this session into RANGE distribution for tables created without
+    ``DISTRIBUTED BY``; a no-op where the variable is already the default."""
+    try:
+        conn.exec_driver_sql("SET enable_range_distribution = true")
+    except DatabaseError as exc:
+        logger.info("enable_range_distribution not settable: %s", exc)
+
+
 def _range_distribution_available(engine: Engine) -> bool:
     """Whether this cluster can host a RANGE-distributed cloud-native table.
 
-    A table created without ``DISTRIBUTED BY`` gets RANGE distribution on a
-    shared-data cluster; a shared-nothing cluster reports RANDOM.
+    The FE restriction only applies to cloud-native (shared-data) tables, so a
+    shared-nothing cluster is rejected up front even though it can create
+    RANGE tables once ``enable_range_distribution`` is set.
     """
     with engine.begin() as conn:
+        run_mode = conn.exec_driver_sql("SELECT @@run_mode").scalar()
+        if str(run_mode).lower() != "shared_data":
+            logger.info("run_mode is %s, not shared_data", run_mode)
+            return False
         conn.exec_driver_sql(f"CREATE DATABASE IF NOT EXISTS `{SCHEMA}`")
         conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{SCHEMA}`.`probe_range`")
+        _enable_range_distribution(conn)
         try:
             conn.exec_driver_sql(
                 f"CREATE TABLE `{SCHEMA}`.`probe_range` (k1 INT, k2 INT, v INT) "
@@ -106,9 +123,21 @@ class TestCombineColumnAltersOnRangeTable:
     def _create_range_table(self, conn, name: str) -> None:
         """A RANGE-distributed table whose sort key is its key columns."""
         conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{self.schema}`.`{name}`")
+        _enable_range_distribution(conn)
         conn.exec_driver_sql(
             f"CREATE TABLE `{self.schema}`.`{name}` (k1 INT, k2 INT, v INT) "
             "DUPLICATE KEY(k1, k2)"
+        )
+
+    def _migration_context(self, conn) -> MigrationContext:
+        """A context with the schema-change wait enabled."""
+        return MigrationContext.configure(
+            connection=conn,
+            opts={
+                "starrocks_wait_for_schema_change": True,
+                "starrocks_schema_change_timeout": 300,
+                "starrocks_schema_change_poll_interval": 1.0,
+            },
         )
 
     def _columns(self, table: str) -> set:
@@ -138,21 +167,15 @@ class TestCombineColumnAltersOnRangeTable:
         table = "t_fe_separate"
         with self.engine.begin() as conn:
             self._create_range_table(conn, table)
-            conn.exec_driver_sql(
-                f"ALTER TABLE `{self.schema}`.`{table}` DROP COLUMN k2"
-            )
-        with self.engine.begin() as conn:
-            conn.exec_driver_sql(
-                f"ALTER TABLE `{self.schema}`.`{table}` ADD COLUMN v2 INT"
-            )
+            # Issued through Alembic with starrocks_wait_for_schema_change on:
+            # the routed drop is a real rewrite job, so the second statement is
+            # only accepted once the impl has waited it out.
+            operations = Operations(self._migration_context(conn))
+            operations.drop_column(table, "k2", schema=self.schema)
+            operations.add_column(table, Column("v2", INTEGER), schema=self.schema)
         cols = self._columns(table)
         assert "k2" not in cols and "v2" in cols
 
-    @pytest.mark.xfail(
-        reason="combine_column_alters coalesces unconditionally; range sort-key "
-               "changes must stay standalone",
-        strict=False,
-    )
     def test_rewriter_keeps_a_range_sort_key_drop_standalone(self):
         """A sort-key DROP must not be folded in with another column change."""
         table = "t_rewriter_drop"
@@ -173,24 +196,12 @@ class TestCombineColumnAltersOnRangeTable:
             any(c.name == "k2" for c in o.drops) and o.adds for o in combined
         ), "range sort-key DROP was coalesced with another column change"
 
-    @pytest.mark.xfail(
-        reason="combine_column_alters coalesces unconditionally; the resulting "
-               "multi-clause ALTER is rejected by the FE",
-        strict=False,
-    )
     def test_rewritten_migration_executes_on_a_range_table(self):
         """End to end: the rewritten ops must actually run against the cluster."""
         table = "t_rewriter_exec"
         with self.engine.begin() as conn:
             self._create_range_table(conn, table)
-            ctx = MigrationContext.configure(
-                connection=conn,
-                opts={
-                    "starrocks_wait_for_schema_change": True,
-                    "starrocks_schema_change_timeout": 300,
-                    "starrocks_schema_change_poll_interval": 1.0,
-                },
-            )
+            ctx = self._migration_context(conn)
 
             mto = ops.ModifyTableOps(table, ops=[
                 ops.DropColumnOp(table, "k2", schema=self.schema),
@@ -204,3 +215,34 @@ class TestCombineColumnAltersOnRangeTable:
 
         cols = self._columns(table)
         assert "k2" not in cols and "v2" in cols
+
+    def test_rewritten_key_add_executes_on_a_range_aggregate_table(self):
+        """End to end for the ADD path: a KEY column added to an AGGREGATE KEY
+        range table joins the key-derived sort key, so it must stay standalone
+        while the aggregated value column is still added."""
+        table = "t_rewriter_agg_add"
+        with self.engine.begin() as conn:
+            conn.exec_driver_sql(f"DROP TABLE IF EXISTS `{self.schema}`.`{table}`")
+            _enable_range_distribution(conn)
+            conn.exec_driver_sql(
+                f"CREATE TABLE `{self.schema}`.`{table}` (k1 INT, k2 INT, v1 INT SUM) "
+                "AGGREGATE KEY(k1, k2)"
+            )
+            ctx = self._migration_context(conn)
+
+            mto = ops.ModifyTableOps(table, ops=[
+                ops.AddColumnOp(table, Column("k3", INTEGER, starrocks_is_agg_key=True),
+                                schema=self.schema),
+                ops.AddColumnOp(table, Column("v2", INTEGER, starrocks_agg_type="SUM"),
+                                schema=self.schema),
+            ], schema=self.schema)
+            rewritten = _combine_column_alters(ctx, None, mto)
+            assert not any(isinstance(o, AlterTableColumnsOp) for o in rewritten.ops), \
+                "range sort-key ADD was coalesced with another column change"
+
+            operations = Operations(ctx)
+            for inner in rewritten.ops:
+                operations.invoke(inner)
+
+        cols = self._columns(table)
+        assert {"k3", "v2"} <= cols
